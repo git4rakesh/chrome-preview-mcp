@@ -1,0 +1,21 @@
+{
+  "name": "chrome-preview-mcp",
+  "version": "1.0.0",
+  "description": "Interactive Chrome Preview MCP server with persistent profile and anti-detection for seamless Google OAuth",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["mcp", "chrome", "preview", "devtools"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "puppeteer-core": "^24.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "typescript": "^5.8.2"
+  }
+}
