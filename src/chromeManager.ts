@@ -70,7 +70,6 @@ export class ChromeManager {
         `--user-data-dir=${this.userDataDir}`,
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-blink-features=AutomationControlled',
         '--disable-infobars',
         '--window-size=1280,900',
         initialUrl && initialUrl !== 'about:blank' ? initialUrl : 'about:blank',
@@ -142,9 +141,13 @@ export class ChromeManager {
   private async applyStealth(page: Page): Promise<void> {
     try {
       await page.evaluateOnNewDocument(() => {
-        // Mask navigator.webdriver
+        // Mask navigator.webdriver completely
+        try {
+          delete (Object.getPrototypeOf(navigator) as any).webdriver;
+        } catch {}
         Object.defineProperty(navigator, 'webdriver', {
           get: () => undefined,
+          configurable: true,
         });
 
         // Mock chrome.runtime if missing
@@ -153,11 +156,13 @@ export class ChromeManager {
         }
 
         // Mask permissions query for notifications
-        const originalQuery = window.navigator.permissions.query;
-        window.navigator.permissions.query = (parameters: any) =>
-          parameters.name === 'notifications'
-            ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
-            : originalQuery(parameters);
+        const originalQuery = window.navigator.permissions?.query;
+        if (originalQuery) {
+          window.navigator.permissions.query = (parameters: any) =>
+            parameters.name === 'notifications'
+              ? Promise.resolve({ state: Notification.permission } as PermissionStatus)
+              : originalQuery(parameters);
+        }
       });
     } catch {
       // Ignore if already evaluated
