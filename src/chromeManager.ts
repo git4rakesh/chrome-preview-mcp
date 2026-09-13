@@ -132,8 +132,9 @@ export class ChromeManager {
       return newPage;
     }
 
-    // Return the last active/focused page
-    const page = pages[pages.length - 1];
+    // Prefer the active tab with actual content over about:blank
+    const nonBlank = pages.find((p) => p.url() !== 'about:blank' && p.url() !== '');
+    const page = nonBlank || pages[pages.length - 1];
     await this.applyStealth(page);
     return page;
   }
