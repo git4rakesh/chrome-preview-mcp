@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Console Fixture</title>
+  </head>
+  <body>
+    <h1>Console Fixture</h1>
+    <script>
+      // Drive console capture: a log, an error, and an uncaught exception that
+      // surfaces as a pageerror event. The throw is deferred via setTimeout so
+      // it does not abort the surrounding script before the console calls run.
+      console.log('hello from page');
+      console.error('boom');
+      setTimeout(function () {
+        throw new Error('uncaught boom');
+      }, 0);
+    </script>
+  </body>
+</html>

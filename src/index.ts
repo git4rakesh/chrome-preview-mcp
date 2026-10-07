@@ -315,6 +315,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['id'],
         },
       },
+      {
+        name: 'get_console_messages',
+        description:
+          'Get buffered console messages and uncaught page errors for the active page (set allPages to merge all tabs). Each entry has a type (log/info/warn/error/debug from console events, plus "pageerror" for uncaught page errors), text, and location (url, lineNumber, columnNumber when available). Optional level filters by exact type.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            allPages: {
+              type: 'boolean',
+              description: 'Merge console messages from all tracked tabs (default: active page only).',
+            },
+            level: {
+              type: 'string',
+              description:
+                'Filter by exact message type: log, info, warn, error, debug, or pageerror.',
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -480,6 +499,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!id) throw new Error('id parameter is required');
         const redact = args?.redact as boolean | undefined;
         const result = await tools.getNetworkRequest({ id, redact });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'get_console_messages': {
+        const allPages = args?.allPages as boolean | undefined;
+        const level = args?.level as string | undefined;
+        const result = await tools.getConsoleMessages({ allPages, level });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

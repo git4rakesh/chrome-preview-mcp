@@ -819,4 +819,46 @@ export class BrowserTools {
 
     return result;
   }
+
+  // ---- Console access (Task 8) ---------------------------------------------
+
+  /**
+   * List buffered console messages and uncaught page errors for the active
+   * page (set `allPages` to merge every tracked page's buffer). Each entry has
+   * a `type` (log/info/warn/error/debug/… from the console event, plus a
+   * distinct "pageerror" type for uncaught page errors), `text`, and a
+   * `location` (url + lineNumber + columnNumber when available). Optional
+   * `level` filters by exact type match (e.g. "error" or "pageerror"). Returns
+   * a capped list. Never throws.
+   */
+  public async getConsoleMessages(args: {
+    allPages?: boolean;
+    level?: string;
+  } = {}) {
+    const pages = args.allPages
+      ? this.chromeManager.getPages().filter((p) => !p.isClosed())
+      : [this.chromeManager.getActivePageOrNull()].filter(
+          (p): p is Page => p !== null && !p.isClosed()
+        );
+
+    const entries = pages.flatMap((p) => this.chromeManager.getConsoleEntries(p));
+
+    const filtered =
+      args.level !== undefined
+        ? entries.filter((e) => e.type === args.level)
+        : entries;
+
+    const messages = filtered.map((e) => ({
+      type: e.type,
+      text: e.text,
+      location: {
+        url: e.url,
+        lineNumber: e.lineNumber,
+        columnNumber: e.columnNumber,
+      },
+      timestamp: e.timestamp,
+    }));
+
+    return { messages, count: messages.length };
+  }
 }
