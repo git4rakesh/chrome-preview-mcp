@@ -108,10 +108,41 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'get_content',
         description:
-          'Get the current page title, URL, headings, buttons, and form inputs for reasoning.',
+          'Get the current page title, URL, headings, buttons, and form inputs for reasoning. Optionally includes visible text, which can be scoped to a CSS selector.',
         inputSchema: {
           type: 'object',
-          properties: {},
+          properties: {
+            selector: {
+              type: 'string',
+              description:
+                'Optional CSS selector. When provided, extracted visible text is scoped to the first matching element (title/url stay page-level). If nothing matches, a structured not-found result is returned (no error).',
+            },
+            includeText: {
+              type: 'boolean',
+              description:
+                'Whether to include extracted visible text (default true). Text is capped and flagged with "truncated" when the cap is hit.',
+            },
+          },
+        },
+      },
+      {
+        name: 'get_html',
+        description:
+          'Get the outerHTML of the page (document.documentElement) or, when a CSS selector is given, of the first matching element. If the selector matches nothing, a structured not-found result is returned (no error). Output is capped and flagged with "truncated" when the cap is hit.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: {
+              type: 'string',
+              description:
+                'Optional CSS selector. When provided, return the first matching element\'s outerHTML; when omitted, return the full document outerHTML.',
+            },
+            maxLength: {
+              type: 'number',
+              description:
+                'Optional override of the default HTML length cap. Non-positive or invalid values fall back to the default.',
+            },
+          },
         },
       },
       {
@@ -273,7 +304,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_content': {
-        const result = await tools.getContent();
+        const selector = args?.selector as string | undefined;
+        const includeText = args?.includeText as boolean | undefined;
+        const result = await tools.getContent({ selector, includeText });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'get_html': {
+        const selector = args?.selector as string | undefined;
+        const maxLength = args?.maxLength as number | undefined;
+        const result = await tools.getHtml({ selector, maxLength });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

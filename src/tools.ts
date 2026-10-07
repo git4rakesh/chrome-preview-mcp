@@ -1,8 +1,22 @@
 import { Page } from 'puppeteer-core';
 import { ChromeManager } from './chromeManager.js';
 
+// Size caps for page-reading tools. Constants only (no env/manual config) so
+// the defaults work out of the box; callers may override get_html's cap via
+// its maxLength param.
+const MAX_CONTENT_CHARS = 50000;
+const MAX_HTML_CHARS = 500000;
+
 export class BrowserTools {
   constructor(private chromeManager: ChromeManager) {}
+
+  /** Slice a string to `max` chars, reporting whether truncation occurred. */
+  private capText(s: string, max: number): { text: string; truncated: boolean } {
+    if (s.length > max) {
+      return { text: s.slice(0, max), truncated: true };
+    }
+    return { text: s, truncated: false };
+  }
 
   public async openBrowser(url: string) {
     const { page } = await this.chromeManager.launch(url);
@@ -63,7 +77,23 @@ export class BrowserTools {
     };
   }
 
-  public async getContent() {
+  /**
+   * Get a structured page summary (title, url, headings, buttons, inputs,
+   * links). Backward compatible: existing fields are unchanged.
+   *
+   * New optional behaviour:
+   *  - `includeText` (default true): add a `text` field with visible text.
+   *    Text is capped to MAX_CONTENT_CHARS; `truncated` reports whether the
+   *    cap was hit.
+   *  - `selector`: when provided, scope the extracted text to the first
+   *    matching element's innerText. Title/url/summary stay page-level. If the
+   *    selector matches nothing, return `selectorFound:false` and `text:null`
+   *    without throwing.
+   */
+  public async getContent(
+    opts: { selector?: string; includeText?: boolean } = {}
+  ) {
+    const includeText = opts.includeText !== false; // default true
     const page = await this.chromeManager.getActivePage();
     const title = await page.title();
     const currentUrl = page.url();
@@ -99,10 +129,95 @@ export class BrowserTools {
       };
     });
 
-    return {
+    const base = {
       title,
       currentUrl,
       ...summary,
+    };
+
+    if (!includeText) {
+      return base;
+    }
+
+    // Extract visible text, optionally scoped to a selector. Returns null when
+    // a selector was given but matched nothing (reported via selectorFound).
+    const extracted = await page.evaluate((selector: string | undefined) => {
+      if (selector) {
+        const el = document.querySelector(selector) as HTMLElement | null;
+        if (!el) return { found: false, text: null as string | null };
+        return { found: true, text: el.innerText || '' };
+      }
+      return {
+        found: true,
+        text: document.body ? document.body.innerText || '' : '',
+      };
+    }, opts.selector);
+
+    if (opts.selector !== undefined && !extracted.found) {
+      return {
+        ...base,
+        selector: opts.selector,
+        selectorFound: false,
+        text: null,
+        truncated: false,
+      };
+    }
+
+    const { text, truncated } = this.capText(extracted.text ?? '', MAX_CONTENT_CHARS);
+
+    return {
+      ...base,
+      ...(opts.selector !== undefined ? { selector: opts.selector, selectorFound: true } : {}),
+      text,
+      truncated,
+    };
+  }
+
+  /**
+   * Return outerHTML for the page or a scoped element.
+   *  - `selector`: when provided, return the first matching element's
+   *    outerHTML; if no match, return `selectorFound:false` and `html:null`
+   *    without throwing. When omitted, return document.documentElement.outerHTML.
+   *  - `maxLength`: optional override of the default MAX_HTML_CHARS cap. A
+   *    non-number or value <= 0 falls back to the default (never throws).
+   * HTML is capped and `truncated` reports whether the cap was hit.
+   */
+  public async getHtml(opts: { selector?: string; maxLength?: number } = {}) {
+    const page = await this.chromeManager.getActivePage();
+    const currentUrl = page.url();
+
+    const cap =
+      typeof opts.maxLength === 'number' && opts.maxLength > 0
+        ? opts.maxLength
+        : MAX_HTML_CHARS;
+
+    const extracted = await page.evaluate((selector: string | undefined) => {
+      if (selector) {
+        const el = document.querySelector(selector) as Element | null;
+        if (!el) return { found: false, html: null as string | null };
+        return { found: true, html: el.outerHTML };
+      }
+      return { found: true, html: document.documentElement.outerHTML };
+    }, opts.selector);
+
+    if (opts.selector !== undefined && !extracted.found) {
+      return {
+        currentUrl,
+        selector: opts.selector,
+        selectorFound: false,
+        html: null,
+        truncated: false,
+      };
+    }
+
+    const { text: html, truncated } = this.capText(extracted.html ?? '', cap);
+
+    return {
+      currentUrl,
+      ...(opts.selector !== undefined ? { selector: opts.selector, selectorFound: true } : {}),
+      html,
+      length: html.length,
+      truncated,
     };
   }
 

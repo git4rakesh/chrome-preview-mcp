@@ -48,10 +48,11 @@ npm run build
 3. `click`: Click an element by CSS selector.
 4. `type`: Type text into an input or textarea.
 5. `press_key`: Press keyboard keys (`Enter`, `Tab`, `Escape`, etc.).
-6. `get_content`: Get page title, URL, headings, buttons, and form inputs.
-7. `take_screenshot`: Capture visual screenshot of the active tab.
-8. `evaluate`: Execute JavaScript in the page context.
-9. `close_browser`: Safely close the browser session.
+6. `get_content`: Get page title, URL, headings, buttons, and form inputs. Optional `selector` scopes extracted visible text to the first matching element; optional `includeText` (default `true`) toggles the visible-text field. Text is capped with a `truncated` flag.
+7. `get_html`: Get the page's `outerHTML` (full document, or the first element matching an optional `selector`). Optional `maxLength` overrides the default size cap; output is flagged `truncated` when capped.
+8. `take_screenshot`: Capture visual screenshot of the active tab.
+9. `evaluate`: Execute JavaScript in the page context.
+10. `close_browser`: Safely close the browser session.
 
 ## MCP Client Configuration
 
