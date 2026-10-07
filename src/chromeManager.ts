@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import puppeteer, { Browser, Page } from 'puppeteer-core';
+import puppeteer, { Browser, Page, Target } from 'puppeteer-core';
 
 export interface ChromeManagerOptions {
   chromePath?: string;
@@ -130,6 +130,20 @@ export class ChromeManager {
   private browser: Browser | null = null;
   private process: ChildProcess | null = null;
 
+  // Live page registry. A Set preserves insertion order and dedupes, so the
+  // "most-recently-added survivor" on destroy is simply [...pages].pop().
+  private pages = new Set<Page>();
+  // Explicitly tracked active page. BrowserTools drives whatever this points
+  // at, so new tabs/popups are never lost.
+  private activePage: Page | null = null;
+  // Guards stealth idempotency: evaluateOnNewDocument() stacks on every call,
+  // so each page must be stealthed exactly once.
+  private stealthed = new WeakSet<Page>();
+  // Bound target-event handlers, stored so close() can detach them.
+  private onTargetCreated?: (target: Target) => Promise<void>;
+  private onTargetDestroyed?: (target: Target) => Promise<void>;
+  private listenersAttached = false;
+
   constructor(options?: ChromeManagerOptions) {
     this.chromePath = options?.chromePath || this.findChromePath();
     this.userDataDir =
@@ -203,8 +217,21 @@ export class ChromeManager {
       });
     }
 
-    const page = await this.getActivePage();
-    await this.applyStealth(page);
+    this.attachTargetListeners();
+
+    // Seed the registry with pages that already exist (don't rely only on
+    // future targetcreated events). registerPage applies stealth centrally.
+    const existing = await this.browser.pages();
+    for (const existingPage of existing) {
+      await this.registerPage(existingPage);
+    }
+
+    // Obtain the page to drive: the seeded active page, or a fresh one.
+    let page = this.activePage;
+    if (!page || page.isClosed()) {
+      page = await this.browser.newPage();
+      await this.registerPage(page);
+    }
 
     if (initialUrl && initialUrl !== 'about:blank') {
       const currentUrl = page.url();
@@ -220,24 +247,112 @@ export class ChromeManager {
     return { browser: this.browser, page };
   }
 
+  /**
+   * Returns the explicitly tracked active page. Backward compatible: same name,
+   * same `Promise<Page>` return type, existing BrowserTools callers unchanged.
+   * Lazily launches when the browser is absent and falls back to re-seeding /
+   * opening a page so it never returns nothing.
+   */
   public async getActivePage(): Promise<Page> {
     if (!this.browser || !this.browser.isConnected()) {
       const { page } = await this.launch();
       return page;
     }
 
-    const pages = await this.browser.pages();
-    if (pages.length === 0) {
-      const newPage = await this.browser.newPage();
-      await this.applyStealth(newPage);
-      return newPage;
+    if (this.activePage && !this.activePage.isClosed()) {
+      return this.activePage;
     }
 
-    // Prefer the active tab with actual content over about:blank
-    const nonBlank = pages.find((p) => p.url() !== 'about:blank' && p.url() !== '');
-    const page = nonBlank || pages[pages.length - 1];
-    await this.applyStealth(page);
-    return page;
+    // Registry empty or active page closed: re-seed from live pages.
+    const existing = await this.browser.pages();
+    for (const existingPage of existing) {
+      if (!existingPage.isClosed()) {
+        await this.registerPage(existingPage);
+      }
+    }
+
+    if (!this.activePage || this.activePage.isClosed()) {
+      const page = await this.browser.newPage();
+      await this.registerPage(page);
+    }
+
+    return this.activePage!;
+  }
+
+  /** Snapshot of all tracked open pages (test accessor; Task 3 builds on it). */
+  public getPages(): Page[] {
+    return [...this.pages];
+  }
+
+  /**
+   * Single central path for page registration. Both startup seeding and the
+   * targetcreated handler route through here so a window.open popup gets the
+   * exact same treatment as the initial page: tracked, stealthed once, and
+   * made active. Never throws (race-safe) so it can't crash the server.
+   */
+  private async registerPage(page: Page): Promise<void> {
+    try {
+      if (!this.pages.has(page)) {
+        this.pages.add(page);
+        // Apply stealth exactly once per page through this one place.
+        if (!this.stealthed.has(page)) {
+          await this.applyStealth(page);
+          this.stealthed.add(page);
+        }
+        // Deregister when the page closes.
+        page.once('close', () => this.deregisterPage(page));
+      }
+      // Activation policy: a newly registered tab/popup BECOMES the active
+      // page, so new tabs are never lost.
+      this.activePage = page;
+    } catch (err) {
+      // Race: page may already be closed/navigated. Log, never rethrow.
+      console.error('registerPage failed:', err);
+    }
+  }
+
+  /** Remove a page from the registry and reselect a sane active page. */
+  private deregisterPage(page: Page): void {
+    this.pages.delete(page);
+    this.stealthed.delete(page);
+    if (this.activePage === page) {
+      // Most-recently-added survivor, or null when none remain.
+      this.activePage = [...this.pages].pop() ?? null;
+    }
+  }
+
+  /** Attach targetcreated/targetdestroyed handlers once per connection. */
+  private attachTargetListeners(): void {
+    if (!this.browser || this.listenersAttached) return;
+
+    this.onTargetCreated = async (target: Target) => {
+      try {
+        if (target.type() !== 'page') return;
+        const page = await target.page();
+        if (!page) return; // race: target.page() can be null
+        await this.registerPage(page);
+      } catch (err) {
+        // Never crash the server on a target event.
+        console.error('targetcreated handler failed:', err);
+      }
+    };
+
+    this.onTargetDestroyed = async (_target: Target) => {
+      try {
+        // The target may be gone, so prune any pages that are now closed. The
+        // per-page 'close' listener is the primary dereg path; this is a
+        // backstop.
+        for (const p of [...this.pages]) {
+          if (p.isClosed()) this.deregisterPage(p);
+        }
+      } catch (err) {
+        console.error('targetdestroyed handler failed:', err);
+      }
+    };
+
+    this.browser.on('targetcreated', this.onTargetCreated);
+    this.browser.on('targetdestroyed', this.onTargetDestroyed);
+    this.listenersAttached = true;
   }
 
   private async applyStealth(page: Page): Promise<void> {
@@ -272,8 +387,26 @@ export class ChromeManager {
   }
 
   public async close(): Promise<void> {
+    if (this.browser) {
+      // Detach target listeners so they don't leak across re-launches.
+      if (this.onTargetCreated) {
+        this.browser.off('targetcreated', this.onTargetCreated);
+      }
+      if (this.onTargetDestroyed) {
+        this.browser.off('targetdestroyed', this.onTargetDestroyed);
+      }
+    }
+    this.listenersAttached = false;
+    this.onTargetCreated = undefined;
+    this.onTargetDestroyed = undefined;
+    this.pages.clear();
+    this.activePage = null;
+    this.stealthed = new WeakSet<Page>();
+
     if (this.browser && this.browser.isConnected()) {
       await this.browser.close();
+      this.browser = null;
+    } else {
       this.browser = null;
     }
     if (this.process) {
