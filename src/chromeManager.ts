@@ -285,6 +285,30 @@ export class ChromeManager {
   }
 
   /**
+   * Returns the currently tracked active page without lazily launching the
+   * browser (unlike getActivePage()). Multi-tab tools use this to mark the
+   * active tab and to resolve "close the active tab" without forcing a launch.
+   */
+  public getActivePageOrNull(): Page | null {
+    return this.activePage;
+  }
+
+  /**
+   * Single public activation entry point for already-registered pages. Sets
+   * the given page active iff it is tracked and still open. Does NOT register
+   * or (re)apply stealth — those remain owned solely by registerPage() so the
+   * stealth-in-one-place invariant holds. Returns false on a stale/unknown
+   * page so callers can surface a structured error instead of throwing.
+   */
+  public setActivePage(page: Page): boolean {
+    if (this.pages.has(page) && !page.isClosed()) {
+      this.activePage = page;
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Single central path for page registration. Both startup seeding and the
    * targetcreated handler route through here so a window.open popup gets the
    * exact same treatment as the initial page: tracked, stealthed once, and

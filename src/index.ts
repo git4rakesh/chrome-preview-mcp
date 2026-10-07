@@ -144,6 +144,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {},
         },
       },
+      {
+        name: 'list_tabs',
+        description:
+          'List all open browser tabs with index, id, title, URL, and which one is active.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+        },
+      },
+      {
+        name: 'select_tab',
+        description:
+          'Switch the active tab by id or 0-based index and bring it to front.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: 'Stable tab id (from list_tabs). Preferred when both are given.',
+            },
+            index: {
+              type: 'number',
+              description: '0-based tab index (from list_tabs).',
+            },
+          },
+        },
+      },
+      {
+        name: 'close_tab',
+        description:
+          'Close a tab by id or index (defaults to the active tab) and reselect a sane active tab.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: 'Stable tab id (from list_tabs).',
+            },
+            index: {
+              type: 'number',
+              description: '0-based tab index (from list_tabs).',
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -232,6 +277,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'close_browser': {
         const result = await tools.closeBrowser();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'list_tabs': {
+        const result = await tools.listTabs();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'select_tab': {
+        const id = args?.id as string | undefined;
+        const index = args?.index as number | undefined;
+        const result = await tools.selectTab({ id, index });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'close_tab': {
+        const id = args?.id as string | undefined;
+        const index = args?.index as number | undefined;
+        const result = await tools.closeTab({ id, index });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
