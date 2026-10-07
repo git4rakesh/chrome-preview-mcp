@@ -1,0 +1,10 @@
+{
+  // Test build config: compiles src + test to dist-test/ so node:test can run
+  // the compiled JS. The main build (tsconfig.json -> dist/) is left untouched.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./dist-test"
+  },
+  "include": ["src/**/*", "test/**/*.ts"]
+}

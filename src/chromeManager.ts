@@ -10,6 +10,119 @@ export interface ChromeManagerOptions {
   port?: number;
 }
 
+/**
+ * Resolve a Chrome/Chromium-family executable path cross-platform.
+ * Returns the first existing candidate, or `null` if none is found.
+ *
+ * This is a non-throwing counterpart to the browser launch flow and is
+ * safe to call from tests to decide whether browser-dependent tests can run.
+ * Resolution order: explicit CHROME_PATH override, per-platform install
+ * locations, then a PATH scan fallback.
+ */
+export function detectChromePath(): string | null {
+  // Explicit override always wins, regardless of platform.
+  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
+    return process.env.CHROME_PATH;
+  }
+
+  const candidates = getChromeCandidatesForPlatform();
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Last resort: try to resolve a Chromium-family binary from PATH.
+  return findChromeOnPath();
+}
+
+function getChromeCandidatesForPlatform(): string[] {
+  const home = os.homedir();
+  const platform = process.platform;
+
+  if (platform === 'win32') {
+    const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+    const programFilesX86 =
+      process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const localAppData =
+      process.env['LOCALAPPDATA'] || path.join(home, 'AppData', 'Local');
+
+    return [
+      path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(programFiles, 'Google\\Chrome Beta\\Application\\chrome.exe'),
+      path.join(programFiles, 'Google\\Chrome SxS\\Application\\chrome.exe'),
+      path.join(localAppData, 'Google\\Chrome SxS\\Application\\chrome.exe'),
+      path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
+      path.join(localAppData, 'Chromium\\Application\\chrome.exe'),
+      path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+      path.join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+    ];
+  }
+
+  if (platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      path.join(home, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    ];
+  }
+
+  // Linux and other Unix-like systems.
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome-beta',
+    '/usr/bin/google-chrome-unstable',
+    '/opt/google/chrome/chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/microsoft-edge-stable',
+    '/usr/bin/brave-browser',
+  ];
+}
+
+function findChromeOnPath(): string | null {
+  const isWindows = process.platform === 'win32';
+  const binaries = isWindows
+    ? ['chrome.exe', 'chromium.exe', 'msedge.exe', 'brave.exe']
+    : [
+        'google-chrome',
+        'google-chrome-stable',
+        'chromium',
+        'chromium-browser',
+        'microsoft-edge',
+        'brave-browser',
+      ];
+
+  const pathEnv = process.env.PATH || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    for (const binary of binaries) {
+      const candidate = path.join(dir, binary);
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      } catch {
+        // Ignore inaccessible PATH entries
+      }
+    }
+  }
+
+  return null;
+}
+
 export class ChromeManager {
   private chromePath: string;
   private userDataDir: string;
@@ -26,115 +139,14 @@ export class ChromeManager {
   }
 
   private findChromePath(): string {
-    // Explicit override always wins, regardless of platform.
-    if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-      return process.env.CHROME_PATH;
-    }
-
-    const candidates = this.getChromeCandidatesForPlatform();
-
-    for (const candidate of candidates) {
-      if (candidate && fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-
-    // Last resort: try to resolve a Chromium-family binary from PATH.
-    const fromPath = this.findChromeOnPath();
-    if (fromPath) {
-      return fromPath;
+    const resolved = detectChromePath();
+    if (resolved) {
+      return resolved;
     }
 
     throw new Error(
       'Chrome/Chromium executable not found. Set the CHROME_PATH environment variable to your browser binary, or install Google Chrome / Chromium.'
     );
-  }
-
-  private getChromeCandidatesForPlatform(): string[] {
-    const home = os.homedir();
-    const platform = process.platform;
-
-    if (platform === 'win32') {
-      const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
-      const programFilesX86 =
-        process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
-      const localAppData =
-        process.env['LOCALAPPDATA'] || path.join(home, 'AppData', 'Local');
-
-      return [
-        path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(programFiles, 'Google\\Chrome Beta\\Application\\chrome.exe'),
-        path.join(programFiles, 'Google\\Chrome SxS\\Application\\chrome.exe'),
-        path.join(localAppData, 'Google\\Chrome SxS\\Application\\chrome.exe'),
-        path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
-        path.join(localAppData, 'Chromium\\Application\\chrome.exe'),
-        path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-        path.join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-      ];
-    }
-
-    if (platform === 'darwin') {
-      return [
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        path.join(home, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-        '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
-        '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
-        '/Applications/Chromium.app/Contents/MacOS/Chromium',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-        '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-      ];
-    }
-
-    // Linux and other Unix-like systems.
-    return [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome-beta',
-      '/usr/bin/google-chrome-unstable',
-      '/opt/google/chrome/chrome',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/snap/bin/chromium',
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/brave-browser',
-    ];
-  }
-
-  private findChromeOnPath(): string | null {
-    const isWindows = process.platform === 'win32';
-    const binaries = isWindows
-      ? ['chrome.exe', 'chromium.exe', 'msedge.exe', 'brave.exe']
-      : [
-          'google-chrome',
-          'google-chrome-stable',
-          'chromium',
-          'chromium-browser',
-          'microsoft-edge',
-          'brave-browser',
-        ];
-
-    const pathEnv = process.env.PATH || '';
-    const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
-
-    for (const dir of pathDirs) {
-      for (const binary of binaries) {
-        const candidate = path.join(dir, binary);
-        try {
-          if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-            return candidate;
-          }
-        } catch {
-          // Ignore inaccessible PATH entries
-        }
-      }
-    }
-
-    return null;
   }
 
   private async isPortOpen(port: number): Promise<boolean> {
