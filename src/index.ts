@@ -189,6 +189,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'wait_for',
+        description:
+          'Wait for a CSS selector to become visible, text to appear in the page, or the network to go idle. Provide at least one condition; the first one satisfied wins. Returns which condition matched and elapsed ms, and never throws on timeout (returns a structured timed-out result).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            selector: {
+              type: 'string',
+              description: 'CSS selector to wait for becoming visible.',
+            },
+            text: {
+              type: 'string',
+              description: 'Text to wait for anywhere in the page body.',
+            },
+            networkIdle: {
+              type: 'boolean',
+              description: 'If true, wait for the network to become idle.',
+            },
+            timeout: {
+              type: 'number',
+              description: 'Overall timeout in ms; defaults to 30000.',
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -302,6 +328,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const id = args?.id as string | undefined;
         const index = args?.index as number | undefined;
         const result = await tools.closeTab({ id, index });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'wait_for': {
+        const selector = args?.selector as string | undefined;
+        const text = args?.text as string | undefined;
+        const networkIdle = args?.networkIdle as boolean | undefined;
+        const timeout = args?.timeout as number | undefined;
+        const result = await tools.waitFor({ selector, text, networkIdle, timeout });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

@@ -272,4 +272,106 @@ export class BrowserTools {
       message: remaining === 0 ? 'No tabs remain open' : 'Tab closed; active tab reselected',
     };
   }
+
+  // ---- Waiting (Task 4) ----------------------------------------------------
+
+  /**
+   * Wait for ANY of: a CSS selector becoming visible, text appearing anywhere
+   * in document.body.innerText, or the network going idle. The first provided
+   * condition to be satisfied wins (Promise.race). Never throws on timeout or
+   * bad input — returns a structured result instead.
+   *
+   * Cancellation: a single AbortController's signal is passed into every
+   * underlying puppeteer wait, so when the race settles we abort the losers.
+   * Each wait also carries a never-settling `.catch` guard, so a late
+   * TimeoutError/AbortError arriving after a win is swallowed and can never
+   * surface as an unhandledRejection.
+   */
+  public async waitFor(args: {
+    selector?: string;
+    text?: string;
+    networkIdle?: boolean;
+    timeout?: number;
+  }) {
+    const timeout = typeof args.timeout === 'number' ? args.timeout : 30000;
+
+    const provided: Array<'selector' | 'text' | 'networkIdle'> = [];
+    if (args.selector !== undefined) provided.push('selector');
+    if (args.text !== undefined) provided.push('text');
+    if (args.networkIdle === true) provided.push('networkIdle');
+
+    if (provided.length === 0) {
+      return { error: 'Provide at least one of: selector, text, networkIdle' };
+    }
+
+    const page = await this.chromeManager.getActivePage();
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    type Matched = 'selector' | 'text' | 'networkIdle';
+    type RaceResult = { matched: Matched } | { timedOut: true };
+
+    // A never-settling promise lets us neutralize a losing/late rejection:
+    // the condition can never win the race and never crash the process.
+    const neverFromRejection = () => new Promise<never>(() => {});
+
+    const conditions: Array<Promise<RaceResult>> = [];
+
+    if (args.selector !== undefined) {
+      conditions.push(
+        page
+          .waitForSelector(args.selector, { visible: true, timeout, signal })
+          .then(() => ({ matched: 'selector' as const }))
+          .catch(neverFromRejection)
+      );
+    }
+    if (args.text !== undefined) {
+      const text = args.text;
+      conditions.push(
+        page
+          .waitForFunction(
+            (t: string) => !!document.body && document.body.innerText.includes(t),
+            { timeout, signal },
+            text
+          )
+          .then(() => ({ matched: 'text' as const }))
+          .catch(neverFromRejection)
+      );
+    }
+    if (args.networkIdle === true) {
+      conditions.push(
+        page
+          .waitForNetworkIdle({ timeout, signal })
+          .then(() => ({ matched: 'networkIdle' as const }))
+          .catch(neverFromRejection)
+      );
+    }
+
+    // Explicit timer gives a deterministic, label-free timeout decision and a
+    // precise elapsed measurement, independent of each wait's own TimeoutError.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timerPromise = new Promise<RaceResult>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), timeout);
+    });
+
+    const start = Date.now();
+    try {
+      const result = await Promise.race([...conditions, timerPromise]);
+      const elapsedMs = Date.now() - start;
+
+      if ('matched' in result) {
+        return { timedOut: false, matched: result.matched, elapsedMs };
+      }
+      return {
+        timedOut: true,
+        matched: null,
+        elapsedMs,
+        message: `Timed out after ${timeout}ms waiting for: ${provided.join(', ')}`,
+      };
+    } finally {
+      // Cancel the losing waits and clear the timer so nothing leaks.
+      if (timer !== undefined) clearTimeout(timer);
+      controller.abort();
+    }
+  }
 }
