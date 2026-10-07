@@ -1,5 +1,21 @@
-import { Page } from 'puppeteer-core';
+import { Page, ElementHandle } from 'puppeteer-core';
 import { ChromeManager } from './chromeManager.js';
+
+/** Selection mode for the shared element resolver. */
+export type ResolveMode = 'css' | 'text' | 'role';
+
+interface ResolveSuccess {
+  ok: true;
+  handle: ElementHandle<Element>;
+  engineSelector: string; // the selector actually used (css string, or "text/..", or "aria/..")
+}
+interface ResolveFailure {
+  ok: false;
+  error?: string; // set only for bad input
+  notFound?: boolean; // set when the element never resolved within timeout
+  engineSelector?: string;
+}
+type ResolveResult = ResolveSuccess | ResolveFailure;
 
 // Size caps for page-reading tools. Constants only (no env/manual config) so
 // the defaults work out of the box; callers may override get_html's cap via
@@ -43,27 +59,136 @@ export class BrowserTools {
     };
   }
 
-  public async click(selector: string) {
+  /**
+   * Single source of truth for locating an element by CSS (default), visible
+   * text, or ARIA role + accessible name. Shared by both `click` and `type`
+   * so no selection logic is duplicated.
+   *
+   * Uses puppeteer-core's built-in selector engines (confirmed present in
+   * 24.x): `text/<value>` matches by visible text (trimmed, most-specific
+   * element), `aria/<name>[role="<role>"]` matches by accessible name with an
+   * optional role filter. CSS is passed through unchanged, so with `by`
+   * omitted the behaviour is exactly as before.
+   *
+   * Never throws: bad input and not-found (including the wait timing out) are
+   * returned as structured failures, consistent with wait_for/get_content.
+   */
+  private async resolveElement(
+    page: Page,
+    args: { by?: ResolveMode; selector: string; role?: string; timeout?: number }
+  ): Promise<ResolveResult> {
+    const { by, selector, role } = args;
+
+    if (!selector) {
+      return { ok: false, error: 'selector is required' };
+    }
+    if (by !== undefined && by !== 'css' && by !== 'text' && by !== 'role') {
+      return { ok: false, error: 'by must be one of css|text|role' };
+    }
+
+    let engineSelector: string;
+    switch (by) {
+      case 'text':
+        engineSelector = `text/${selector}`;
+        break;
+      case 'role':
+        engineSelector = role
+          ? `aria/${selector}[role="${role}"]`
+          : `aria/${selector}`;
+        break;
+      default:
+        engineSelector = selector; // css / undefined
+    }
+
+    const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
+
+    try {
+      const handle = await page.waitForSelector(engineSelector, {
+        visible: true,
+        timeout,
+      });
+      if (!handle) return { ok: false, notFound: true, engineSelector };
+      return { ok: true, handle: handle as ElementHandle<Element>, engineSelector };
+    } catch {
+      // TimeoutError (or any wait failure) → structured not-found, never thrown.
+      return { ok: false, notFound: true, engineSelector };
+    }
+  }
+
+  public async click(
+    selector: string,
+    opts: { by?: ResolveMode; role?: string } = {}
+  ) {
     const page = await this.chromeManager.getActivePage();
-    // Wait for selector and click
-    await page.waitForSelector(selector, { visible: true, timeout: 10000 });
-    await page.click(selector);
+    const by = opts.by ?? 'css';
+    const res = await this.resolveElement(page, {
+      by: opts.by,
+      selector,
+      role: opts.role,
+    });
+
+    if (!res.ok) {
+      if (res.error) {
+        return { error: res.error, by, selector };
+      }
+      return {
+        found: false,
+        by,
+        selector,
+        role: opts.role,
+        message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    await res.handle.click();
     return {
       message: `Clicked element matching selector: "${selector}"`,
+      by,
+      selector,
       currentUrl: page.url(),
     };
   }
 
-  public async type(selector: string, text: string, clear = false) {
+  public async type(
+    selector: string,
+    text: string,
+    clear = false,
+    opts: { by?: ResolveMode; role?: string } = {}
+  ) {
     const page = await this.chromeManager.getActivePage();
-    await page.waitForSelector(selector, { visible: true, timeout: 10000 });
+    const by = opts.by ?? 'css';
+    const res = await this.resolveElement(page, {
+      by: opts.by,
+      selector,
+      role: opts.role,
+    });
+
+    if (!res.ok) {
+      if (res.error) {
+        return { error: res.error, by, selector };
+      }
+      return {
+        found: false,
+        by,
+        selector,
+        role: opts.role,
+        message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    // Preserve the existing clear/typing semantics exactly, acting on the
+    // resolved handle so text/role resolution is honored.
     if (clear) {
-      await page.click(selector, { clickCount: 3 });
+      await res.handle.click({ clickCount: 3 });
       await page.keyboard.press('Backspace');
     }
-    await page.type(selector, text, { delay: 30 });
+    await res.handle.type(text, { delay: 30 });
     return {
       message: `Typed text into "${selector}"`,
+      by,
+      selector,
       currentUrl: page.url(),
     };
   }

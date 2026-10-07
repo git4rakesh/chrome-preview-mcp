@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Action Fixture</title>
+  </head>
+  <body>
+    <h1>Action Fixture</h1>
+    <button id="go">Click Me</button>
+    <input id="field" type="text" />
+    <script>
+      // Clicking the button changes the title and appends a marker element,
+      // so the click (by CSS, text, or role) is assertable from the DOM/title.
+      document.getElementById('go').addEventListener('click', function () {
+        document.title = 'Clicked!';
+        var marker = document.createElement('div');
+        marker.id = 'clicked-marker';
+        marker.textContent = 'button was clicked';
+        document.body.appendChild(marker);
+      });
+    </script>
+  </body>
+</html>

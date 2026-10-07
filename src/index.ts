@@ -57,13 +57,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'click',
-        description: 'Click an element on the active page by CSS selector.',
+        description:
+          'Click an element on the active page by CSS selector (default), visible text, or ARIA role + accessible name.',
         inputSchema: {
           type: 'object',
           properties: {
             selector: {
               type: 'string',
-              description: 'CSS selector of the element to click (e.g. "button.login-btn" or "#submit")',
+              description:
+                'The target value. When by="css" (default) this is a CSS selector (e.g. "button.login-btn" or "#submit"); when by="text" it is the element\'s visible text; when by="role" it is the accessible name.',
+            },
+            by: {
+              type: 'string',
+              enum: ['css', 'text', 'role'],
+              description:
+                'How to interpret selector: "css" (default), "text" (visible text), or "role" (ARIA accessible name).',
+            },
+            role: {
+              type: 'string',
+              description: 'ARIA role name (e.g. "button") used only when by="role".',
             },
           },
           required: ['selector'],
@@ -71,13 +83,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'type',
-        description: 'Type text into an input or textarea on the active page.',
+        description:
+          'Type text into an input or textarea on the active page, located by CSS selector (default), visible text, or ARIA role + accessible name.',
         inputSchema: {
           type: 'object',
           properties: {
             selector: {
               type: 'string',
-              description: 'CSS selector of the input element',
+              description:
+                'The target value. When by="css" (default) this is a CSS selector; when by="text" it is the element\'s visible text; when by="role" it is the accessible name.',
             },
             text: {
               type: 'string',
@@ -86,6 +100,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             clear: {
               type: 'boolean',
               description: 'Whether to clear existing text before typing',
+            },
+            by: {
+              type: 'string',
+              enum: ['css', 'text', 'role'],
+              description:
+                'How to interpret selector: "css" (default), "text" (visible text), or "role" (ARIA accessible name).',
+            },
+            role: {
+              type: 'string',
+              description: 'ARIA role name (e.g. "textbox") used only when by="role".',
             },
           },
           required: ['selector', 'text'],
@@ -274,8 +298,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'click': {
         const selector = args?.selector as string;
+        const by = args?.by as 'css' | 'text' | 'role' | undefined;
+        const role = args?.role as string | undefined;
         if (!selector) throw new Error('selector parameter is required');
-        const result = await tools.click(selector);
+        const result = await tools.click(selector, { by, role });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
@@ -285,10 +311,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const selector = args?.selector as string;
         const text = args?.text as string;
         const clear = Boolean(args?.clear);
+        const by = args?.by as 'css' | 'text' | 'role' | undefined;
+        const role = args?.role as string | undefined;
         if (!selector || text === undefined) {
           throw new Error('selector and text parameters are required');
         }
-        const result = await tools.type(selector, text, clear);
+        const result = await tools.type(selector, text, clear, { by, role });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
