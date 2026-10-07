@@ -1,5 +1,41 @@
 import { Page, ElementHandle } from 'puppeteer-core';
-import { ChromeManager } from './chromeManager.js';
+import { ChromeManager, MAX_RESPONSE_BODY_CHARS } from './chromeManager.js';
+
+/** Header names that are always redacted (compared case-insensitively). */
+const ALWAYS_REDACT_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+]);
+
+/** Pattern matching header names that look auth/token/secret related. */
+const SENSITIVE_HEADER_PATTERN =
+  /(auth|token|api[-_]?key|secret|session|credential|x-amz-security-token)/i;
+
+/**
+ * Redact sensitive header values by default. Keeps every header key; replaces
+ * the value of any always-redacted or sensitive-looking header with
+ * "[REDACTED]". Pass `redact=false` to opt out entirely. Pure and exported so
+ * it can be unit-tested without a browser. puppeteer lower-cases header names,
+ * but we lower-case defensively to be safe.
+ */
+export function redactHeaders(
+  headers: Record<string, string>,
+  redact = true
+): Record<string, string> {
+  if (!redact) return { ...headers };
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (ALWAYS_REDACT_HEADERS.has(lower) || SENSITIVE_HEADER_PATTERN.test(lower)) {
+      out[key] = '[REDACTED]';
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
 
 /** Selection mode for the shared element resolver. */
 export type ResolveMode = 'css' | 'text' | 'role';
@@ -613,5 +649,174 @@ export class BrowserTools {
       if (timer !== undefined) clearTimeout(timer);
       controller.abort();
     }
+  }
+
+  // ---- Network inspection (Task 7) -----------------------------------------
+
+  /**
+   * List captured network requests from the ring buffer. Defaults to the
+   * active page; set `allPages` to merge every tracked page's buffer. Optional
+   * filters: `url` (substring match), `resourceType` (exact match), `status`
+   * (exact number or a {min,max} range). Returns a public, body-free shape per
+   * entry. Never throws.
+   */
+  public async listNetworkRequests(args: {
+    allPages?: boolean;
+    url?: string;
+    resourceType?: string;
+    status?: number | { min?: number; max?: number };
+  } = {}) {
+    const pages = args.allPages
+      ? this.chromeManager.getPages().filter((p) => !p.isClosed())
+      : [this.chromeManager.getActivePageOrNull()].filter(
+          (p): p is Page => p !== null && !p.isClosed()
+        );
+
+    const entries = pages.flatMap((p) => this.chromeManager.getNetworkEntries(p));
+
+    const statusMatches = (status: number | null): boolean => {
+      if (args.status === undefined) return true;
+      if (status === null) return false;
+      if (typeof args.status === 'number') return status === args.status;
+      const { min, max } = args.status;
+      if (typeof min === 'number' && status < min) return false;
+      if (typeof max === 'number' && status > max) return false;
+      return true;
+    };
+
+    const filtered = entries.filter((e) => {
+      if (args.url !== undefined && !e.url.includes(args.url)) return false;
+      if (args.resourceType !== undefined && e.resourceType !== args.resourceType)
+        return false;
+      if (!statusMatches(e.status)) return false;
+      return true;
+    });
+
+    const requests = filtered.map((e) => ({
+      id: e.id,
+      method: e.method,
+      url: e.url,
+      resourceType: e.resourceType,
+      status: e.status,
+      timestamp: e.timestamp,
+    }));
+
+    return { requests, count: requests.length };
+  }
+
+  /**
+   * Return full detail for one captured request by id: request headers,
+   * response status, response headers, and the response body — but the body
+   * ONLY for text/JSON-like content types, capped to MAX_RESPONSE_BODY_CHARS.
+   * Sensitive headers are redacted by default (`redact:false` opts out).
+   * Everything is structured and this never throws.
+   */
+  public async getNetworkRequest(args: { id: string; redact?: boolean }) {
+    if (!args || !args.id) {
+      return { found: false, error: 'id is required' };
+    }
+    const redact = args.redact !== false; // default true
+
+    const entry = this.chromeManager.findNetworkEntry(args.id);
+    if (!entry) {
+      return { found: false, id: args.id };
+    }
+
+    let requestHeaders: Record<string, string> = {};
+    try {
+      requestHeaders = redactHeaders(entry.req.headers(), redact);
+    } catch {
+      requestHeaders = {};
+    }
+
+    const result: {
+      found: true;
+      id: string;
+      method: string;
+      url: string;
+      resourceType: string;
+      requestHeaders: Record<string, string>;
+      status: number | null;
+      responseHeaders: Record<string, string> | null;
+      contentType: string | null;
+      body: string | null;
+      bodyTruncated: boolean;
+      bodyOmittedReason: string | null;
+      failure?: string;
+    } = {
+      found: true,
+      id: entry.id,
+      method: entry.method,
+      url: entry.url,
+      resourceType: entry.resourceType,
+      requestHeaders,
+      status: entry.status,
+      responseHeaders: null,
+      contentType: null,
+      body: null,
+      bodyTruncated: false,
+      bodyOmittedReason: null,
+    };
+
+    if (entry.failure) {
+      result.failure = entry.failure;
+    }
+
+    const res = entry.res;
+    if (!res) {
+      result.bodyOmittedReason = 'no response captured (pending or failed)';
+      return result;
+    }
+
+    let responseHeaders: Record<string, string> = {};
+    try {
+      responseHeaders = res.headers();
+    } catch {
+      responseHeaders = {};
+    }
+    result.responseHeaders = redactHeaders(responseHeaders, redact);
+    if (result.status === null) {
+      try {
+        result.status = res.status();
+      } catch {
+        // Keep null if unavailable.
+      }
+    }
+
+    // content-type is read from the UNREDACTED headers (it is never sensitive).
+    const contentType = responseHeaders['content-type'] ?? null;
+    result.contentType = contentType;
+
+    const isTextual =
+      contentType !== null &&
+      /(text|json|xml|javascript|ecmascript|x-www-form-urlencoded)/i.test(
+        contentType
+      );
+
+    if (!isTextual) {
+      result.bodyOmittedReason =
+        contentType === null
+          ? 'content-type unavailable; body omitted'
+          : 'non-text content type';
+      return result;
+    }
+
+    try {
+      const text = await res.text();
+      if (text.length > MAX_RESPONSE_BODY_CHARS) {
+        result.body = text.slice(0, MAX_RESPONSE_BODY_CHARS);
+        result.bodyTruncated = true;
+      } else {
+        result.body = text;
+      }
+    } catch (err: any) {
+      // Bodies may be unavailable: redirects, 204, already-consumed, etc.
+      result.body = null;
+      result.bodyOmittedReason = `body unavailable: ${
+        err?.message || String(err)
+      }`;
+    }
+
+    return result;
   }
 }

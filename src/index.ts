@@ -270,6 +270,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'list_network_requests',
+        description:
+          'List captured network requests for the active page (set allPages to merge all tabs). Each entry has a stable id, method, url, resourceType, status, and timestamp. Optional filters: url (substring), resourceType (exact), status (exact number or {min,max} range).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            allPages: {
+              type: 'boolean',
+              description: 'Merge requests from all tracked tabs (default: active page only).',
+            },
+            url: {
+              type: 'string',
+              description: 'Filter to requests whose URL contains this substring.',
+            },
+            resourceType: {
+              type: 'string',
+              description: 'Filter by resource type (e.g. "document", "fetch", "xhr", "script").',
+            },
+            status: {
+              type: 'number',
+              description: 'Filter to requests with this exact HTTP status.',
+            },
+          },
+        },
+      },
+      {
+        name: 'get_network_request',
+        description:
+          'Get full detail for one captured request by id (from list_network_requests): request headers, response status, response headers, and the response body for text/JSON content types only (binary bodies are omitted with a note). Sensitive headers (Authorization, Cookie, Set-Cookie, auth/token/api-key-style) are REDACTED by default; pass redact=false to opt out.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            id: {
+              type: 'string',
+              description: 'The request id from list_network_requests.',
+            },
+            redact: {
+              type: 'boolean',
+              description: 'Redact sensitive headers (default true). Set false to see raw values.',
+            },
+          },
+          required: ['id'],
+        },
+      },
     ],
   };
 });
@@ -409,6 +454,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const networkIdle = args?.networkIdle as boolean | undefined;
         const timeout = args?.timeout as number | undefined;
         const result = await tools.waitFor({ selector, text, networkIdle, timeout });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'list_network_requests': {
+        const allPages = args?.allPages as boolean | undefined;
+        const url = args?.url as string | undefined;
+        const resourceType = args?.resourceType as string | undefined;
+        const status = args?.status as number | undefined;
+        const result = await tools.listNetworkRequests({
+          allPages,
+          url,
+          resourceType,
+          status,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case 'get_network_request': {
+        const id = args?.id as string;
+        if (!id) throw new Error('id parameter is required');
+        const redact = args?.redact as boolean | undefined;
+        const result = await tools.getNetworkRequest({ id, redact });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

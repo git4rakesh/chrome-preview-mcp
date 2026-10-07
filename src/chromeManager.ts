@@ -2,12 +2,58 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import puppeteer, { Browser, Page, Target } from 'puppeteer-core';
+import puppeteer, {
+  Browser,
+  Page,
+  Target,
+  HTTPRequest,
+  HTTPResponse,
+} from 'puppeteer-core';
 
 export interface ChromeManagerOptions {
   chromePath?: string;
   userDataDir?: string;
   port?: number;
+}
+
+// Capture caps. Constants only (no env/manual config) so capture works out of
+// the box and the ring buffers stay bounded. Task 8 reuses MAX_CONSOLE_ENTRIES.
+const MAX_NETWORK_ENTRIES = 500;
+const MAX_CONSOLE_ENTRIES = 500;
+/** Default body cap for get_network_request (read lazily in BrowserTools). */
+export const MAX_RESPONSE_BODY_CHARS = 100000;
+
+/**
+ * One captured network request. Holds live puppeteer refs (`req`/`res`) so
+ * get_network_request can lazily read headers/body at call time without
+ * buffering bodies. `id` is assigned at capture and unique across the manager.
+ */
+export interface NetworkEntry {
+  id: string;
+  method: string;
+  url: string;
+  resourceType: string;
+  status: number | null;
+  timestamp: number;
+  failure?: string;
+  req: HTTPRequest;
+  res?: HTTPResponse;
+}
+
+/** One captured console/pageerror message (Task 8). */
+export interface ConsoleEntry {
+  type: string;
+  text: string;
+  url?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+  timestamp: number;
+}
+
+/** Per-page capture buffers, stored in a WeakMap so they GC with the page. */
+interface PageCaptureState {
+  network: NetworkEntry[];
+  console: ConsoleEntry[];
 }
 
 /**
@@ -139,6 +185,11 @@ export class ChromeManager {
   // Guards stealth idempotency: evaluateOnNewDocument() stacks on every call,
   // so each page must be stealthed exactly once.
   private stealthed = new WeakSet<Page>();
+  // Per-page network/console capture buffers. WeakMap-keyed by Page so a
+  // dropped page's buffers are GC'd automatically; deregisterPage also deletes
+  // eagerly for promptness. Network ids are unique across all pages.
+  private captures = new WeakMap<Page, PageCaptureState>();
+  private networkIdSeq = 0;
   // Bound target-event handlers, stored so close() can detach them.
   private onTargetCreated?: (target: Target) => Promise<void>;
   private onTargetDestroyed?: (target: Target) => Promise<void>;
@@ -325,6 +376,10 @@ export class ChromeManager {
         }
         // Deregister when the page closes.
         page.once('close', () => this.deregisterPage(page));
+        // Wire network (Task 7) and console (Task 8) capture through this one
+        // central path so every tracked page — initial, popup, or new tab —
+        // gets capture attached exactly once.
+        this.attachCaptureListeners(page);
       }
       // Activation policy: a newly registered tab/popup BECOMES the active
       // page, so new tabs are never lost.
@@ -335,10 +390,147 @@ export class ChromeManager {
     }
   }
 
+  /**
+   * Lazily create (and cache) the capture state for a page. Buffers live in a
+   * WeakMap keyed by Page so they are released when the page is GC'd.
+   */
+  private getCaptureState(page: Page): PageCaptureState {
+    let state = this.captures.get(page);
+    if (!state) {
+      state = { network: [], console: [] };
+      this.captures.set(page, state);
+    }
+    return state;
+  }
+
+  /** Push to a ring buffer, dropping the oldest entry past `cap`. */
+  private pushCapped<T>(buffer: T[], entry: T, cap: number): void {
+    buffer.push(entry);
+    if (buffer.length > cap) buffer.shift();
+  }
+
+  /**
+   * Attach per-page network and console/pageerror listeners. Called exactly
+   * once per page from registerPage. Every listener body is try/catch'd so a
+   * capture error can never crash the page or the server. puppeteer removes a
+   * destroyed page's listeners automatically, so no explicit page.off is
+   * needed on close.
+   */
+  private attachCaptureListeners(page: Page): void {
+    const state = this.getCaptureState(page);
+
+    // --- Network (Task 7) ---
+    page.on('request', (req: HTTPRequest) => {
+      try {
+        this.pushCapped(
+          state.network,
+          {
+            id: String(this.networkIdSeq++),
+            method: req.method(),
+            url: req.url(),
+            resourceType: req.resourceType(),
+            status: null,
+            timestamp: Date.now(),
+            req,
+          },
+          MAX_NETWORK_ENTRIES
+        );
+      } catch {
+        // Never let a capture error surface.
+      }
+    });
+
+    page.on('response', (res: HTTPResponse) => {
+      try {
+        const reqRef = res.request();
+        const entry = state.network.find((e) => e.req === reqRef);
+        if (entry) {
+          entry.status = res.status();
+          entry.res = res;
+        }
+      } catch {
+        // Ignore unmatched/raced responses.
+      }
+    });
+
+    page.on('requestfailed', (req: HTTPRequest) => {
+      try {
+        const entry = state.network.find((e) => e.req === req);
+        if (entry) {
+          entry.status = null;
+          entry.failure = req.failure()?.errorText;
+        }
+      } catch {
+        // Ignore.
+      }
+    });
+
+    // --- Console (Task 8) ---
+    page.on('console', (msg) => {
+      try {
+        const loc = msg.location();
+        this.pushCapped(
+          state.console,
+          {
+            type: msg.type(),
+            text: msg.text(),
+            url: loc?.url,
+            lineNumber: loc?.lineNumber,
+            columnNumber: loc?.columnNumber,
+            timestamp: Date.now(),
+          },
+          MAX_CONSOLE_ENTRIES
+        );
+      } catch {
+        // Ignore.
+      }
+    });
+
+    page.on('pageerror', (err: unknown) => {
+      try {
+        this.pushCapped(
+          state.console,
+          {
+            type: 'pageerror',
+            text: err instanceof Error ? err.message : String(err),
+            timestamp: Date.now(),
+          },
+          MAX_CONSOLE_ENTRIES
+        );
+      } catch {
+        // Ignore.
+      }
+    });
+  }
+
+  /** Captured network entries for a page (empty if none captured yet). */
+  public getNetworkEntries(page: Page): NetworkEntry[] {
+    return this.captures.get(page)?.network ?? [];
+  }
+
+  /** Captured console entries for a page (empty if none captured yet). */
+  public getConsoleEntries(page: Page): ConsoleEntry[] {
+    return this.captures.get(page)?.console ?? [];
+  }
+
+  /**
+   * Find a captured network entry by its globally-unique id across all tracked
+   * pages. Returns null when no entry matches (never throws).
+   */
+  public findNetworkEntry(id: string): NetworkEntry | null {
+    for (const page of this.pages) {
+      const entry = this.captures.get(page)?.network.find((e) => e.id === id);
+      if (entry) return entry;
+    }
+    return null;
+  }
+
   /** Remove a page from the registry and reselect a sane active page. */
   private deregisterPage(page: Page): void {
     this.pages.delete(page);
     this.stealthed.delete(page);
+    // Free capture buffers eagerly (the WeakMap would GC them anyway).
+    this.captures.delete(page);
     if (this.activePage === page) {
       // Most-recently-added survivor, or null when none remain.
       this.activePage = [...this.pages].pop() ?? null;

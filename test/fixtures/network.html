@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Network Fixture</title>
+  </head>
+  <body>
+    <h1>Network Fixture</h1>
+    <script>
+      // Attempt a same-directory sub-request so a fetch/xhr resource is
+      // captured without any live network. Cross-origin file:// fetch may be
+      // blocked by Chrome; the test's primary assertion is the main document
+      // request, which is always captured regardless.
+      try {
+        var dataUrl = location.href.replace('network.html', 'network-data.json');
+        fetch(dataUrl).catch(function () {});
+      } catch (e) {}
+    </script>
+  </body>
+</html>
