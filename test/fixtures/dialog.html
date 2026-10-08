@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dialog Fixture</title>
+  </head>
+  <body>
+    <h1>Dialog Fixture</h1>
+    <!-- Clicking #go fires confirm(); an accepted (true) confirm drives the
+         title to 'confirmed', a dismissed (false) one to 'cancelled'. -->
+    <button
+      id="go"
+      onclick="window.__r = confirm('ok?'); document.title = window.__r ? 'confirmed' : 'cancelled';"
+    >go</button>
+  </body>
+</html>

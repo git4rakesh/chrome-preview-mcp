@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Opener Page</title>
+  </head>
+  <body>
+    <h1>Opener Page</h1>
+    <button id="open">Open popup</button>
+    <script>
+      // Derive the popup URL from this page's own file:// location so it works
+      // regardless of the absolute path. Opened on load and also wired to a
+      // button so the test can fall back to a user-gesture click if the popup
+      // blocker swallows the on-load open.
+      var popupUrl = location.href.replace('opener.html', 'popup.html');
+      function openPopup() {
+        window.open(popupUrl, '_blank');
+      }
+      document.getElementById('open').addEventListener('click', openPopup);
+      window.addEventListener('DOMContentLoaded', openPopup);
+    </script>
+  </body>
+</html>

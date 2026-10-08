@@ -2,12 +2,179 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import puppeteer, { Browser, Page } from 'puppeteer-core';
+import puppeteer, {
+  Browser,
+  Page,
+  Target,
+  HTTPRequest,
+  HTTPResponse,
+} from 'puppeteer-core';
+import { config } from './config.js';
 
 export interface ChromeManagerOptions {
   chromePath?: string;
   userDataDir?: string;
   port?: number;
+}
+
+// Capture caps now sourced from the single config module (defaults identical to
+// the previous hard-coded 500/500/100000). The ring buffers stay bounded and
+// everything works out of the box with no env set. Task 8 reuses
+// MAX_CONSOLE_ENTRIES.
+const MAX_NETWORK_ENTRIES = config.NETWORK_BUFFER_SIZE;
+const MAX_CONSOLE_ENTRIES = config.CONSOLE_BUFFER_SIZE;
+/**
+ * Default body cap for get_network_request (read lazily in BrowserTools).
+ * Re-exported from config so tools.ts keeps importing the MAX_RESPONSE_BODY_CHARS
+ * symbol from here unchanged.
+ */
+export const MAX_RESPONSE_BODY_CHARS = config.RESPONSE_BODY_CHARS;
+
+/**
+ * One captured network request. Holds live puppeteer refs (`req`/`res`) so
+ * get_network_request can lazily read headers/body at call time without
+ * buffering bodies. `id` is assigned at capture and unique across the manager.
+ */
+export interface NetworkEntry {
+  id: string;
+  method: string;
+  url: string;
+  resourceType: string;
+  status: number | null;
+  timestamp: number;
+  failure?: string;
+  req: HTTPRequest;
+  res?: HTTPResponse;
+}
+
+/** One captured console/pageerror message (Task 8). */
+export interface ConsoleEntry {
+  type: string;
+  text: string;
+  url?: string;
+  lineNumber?: number;
+  columnNumber?: number;
+  timestamp: number;
+}
+
+/** Per-page capture buffers, stored in a WeakMap so they GC with the page. */
+interface PageCaptureState {
+  network: NetworkEntry[];
+  console: ConsoleEntry[];
+}
+
+/**
+ * Resolve a Chrome/Chromium-family executable path cross-platform.
+ * Returns the first existing candidate, or `null` if none is found.
+ *
+ * This is a non-throwing counterpart to the browser launch flow and is
+ * safe to call from tests to decide whether browser-dependent tests can run.
+ * Resolution order: explicit CHROME_PATH override, per-platform install
+ * locations, then a PATH scan fallback.
+ */
+export function detectChromePath(): string | null {
+  // Explicit override always wins, regardless of platform. Sourced via config
+  // (raw CHROME_PATH value); detection precedence/order is unchanged.
+  if (config.CHROME_PATH && fs.existsSync(config.CHROME_PATH)) {
+    return config.CHROME_PATH;
+  }
+
+  const candidates = getChromeCandidatesForPlatform();
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Last resort: try to resolve a Chromium-family binary from PATH.
+  return findChromeOnPath();
+}
+
+function getChromeCandidatesForPlatform(): string[] {
+  const home = os.homedir();
+  const platform = process.platform;
+
+  if (platform === 'win32') {
+    const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+    const programFilesX86 =
+      process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const localAppData =
+      process.env['LOCALAPPDATA'] || path.join(home, 'AppData', 'Local');
+
+    return [
+      path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(programFiles, 'Google\\Chrome Beta\\Application\\chrome.exe'),
+      path.join(programFiles, 'Google\\Chrome SxS\\Application\\chrome.exe'),
+      path.join(localAppData, 'Google\\Chrome SxS\\Application\\chrome.exe'),
+      path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
+      path.join(localAppData, 'Chromium\\Application\\chrome.exe'),
+      path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
+      path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+      path.join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
+    ];
+  }
+
+  if (platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      path.join(home, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
+      '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    ];
+  }
+
+  // Linux and other Unix-like systems.
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome-beta',
+    '/usr/bin/google-chrome-unstable',
+    '/opt/google/chrome/chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/usr/bin/microsoft-edge',
+    '/usr/bin/microsoft-edge-stable',
+    '/usr/bin/brave-browser',
+  ];
+}
+
+function findChromeOnPath(): string | null {
+  const isWindows = process.platform === 'win32';
+  const binaries = isWindows
+    ? ['chrome.exe', 'chromium.exe', 'msedge.exe', 'brave.exe']
+    : [
+        'google-chrome',
+        'google-chrome-stable',
+        'chromium',
+        'chromium-browser',
+        'microsoft-edge',
+        'brave-browser',
+      ];
+
+  const pathEnv = process.env.PATH || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    for (const binary of binaries) {
+      const candidate = path.join(dir, binary);
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
+      } catch {
+        // Ignore inaccessible PATH entries
+      }
+    }
+  }
+
+  return null;
 }
 
 export class ChromeManager {
@@ -16,6 +183,33 @@ export class ChromeManager {
   private port: number;
   private browser: Browser | null = null;
   private process: ChildProcess | null = null;
+
+  // Live page registry. A Set preserves insertion order and dedupes, so the
+  // "most-recently-added survivor" on destroy is simply [...pages].pop().
+  private pages = new Set<Page>();
+  // Explicitly tracked active page. BrowserTools drives whatever this points
+  // at, so new tabs/popups are never lost.
+  private activePage: Page | null = null;
+  // Guards stealth idempotency: evaluateOnNewDocument() stacks on every call,
+  // so each page must be stealthed exactly once.
+  private stealthed = new WeakSet<Page>();
+  // Dialog auto-handling (Task 9). A persistent cross-page MODE: once set, it
+  // applies to all dialogs on all tracked pages (current and future) until
+  // changed/cleared. null means "no auto-handling configured" and the per-page
+  // handler is then a no-op. The handler reads this config live, so
+  // re-configuring never stacks handlers.
+  private dialogConfig: { action: 'accept' | 'dismiss'; promptText?: string } | null = null;
+  // Guards the per-page 'dialog' listener so each page gets exactly one.
+  private dialogHandled = new WeakSet<Page>();
+  // Per-page network/console capture buffers. WeakMap-keyed by Page so a
+  // dropped page's buffers are GC'd automatically; deregisterPage also deletes
+  // eagerly for promptness. Network ids are unique across all pages.
+  private captures = new WeakMap<Page, PageCaptureState>();
+  private networkIdSeq = 0;
+  // Bound target-event handlers, stored so close() can detach them.
+  private onTargetCreated?: (target: Target) => Promise<void>;
+  private onTargetDestroyed?: (target: Target) => Promise<void>;
+  private listenersAttached = false;
 
   constructor(options?: ChromeManagerOptions) {
     this.chromePath = options?.chromePath || this.findChromePath();
@@ -26,115 +220,14 @@ export class ChromeManager {
   }
 
   private findChromePath(): string {
-    // Explicit override always wins, regardless of platform.
-    if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-      return process.env.CHROME_PATH;
-    }
-
-    const candidates = this.getChromeCandidatesForPlatform();
-
-    for (const candidate of candidates) {
-      if (candidate && fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-
-    // Last resort: try to resolve a Chromium-family binary from PATH.
-    const fromPath = this.findChromeOnPath();
-    if (fromPath) {
-      return fromPath;
+    const resolved = detectChromePath();
+    if (resolved) {
+      return resolved;
     }
 
     throw new Error(
       'Chrome/Chromium executable not found. Set the CHROME_PATH environment variable to your browser binary, or install Google Chrome / Chromium.'
     );
-  }
-
-  private getChromeCandidatesForPlatform(): string[] {
-    const home = os.homedir();
-    const platform = process.platform;
-
-    if (platform === 'win32') {
-      const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files';
-      const programFilesX86 =
-        process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
-      const localAppData =
-        process.env['LOCALAPPDATA'] || path.join(home, 'AppData', 'Local');
-
-      return [
-        path.join(programFiles, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(programFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
-        path.join(programFiles, 'Google\\Chrome Beta\\Application\\chrome.exe'),
-        path.join(programFiles, 'Google\\Chrome SxS\\Application\\chrome.exe'),
-        path.join(localAppData, 'Google\\Chrome SxS\\Application\\chrome.exe'),
-        path.join(programFiles, 'Chromium\\Application\\chrome.exe'),
-        path.join(localAppData, 'Chromium\\Application\\chrome.exe'),
-        path.join(programFiles, 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(programFilesX86, 'Microsoft\\Edge\\Application\\msedge.exe'),
-        path.join(programFiles, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-        path.join(programFilesX86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe'),
-      ];
-    }
-
-    if (platform === 'darwin') {
-      return [
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        path.join(home, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
-        '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta',
-        '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
-        '/Applications/Chromium.app/Contents/MacOS/Chromium',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-        '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-      ];
-    }
-
-    // Linux and other Unix-like systems.
-    return [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome-beta',
-      '/usr/bin/google-chrome-unstable',
-      '/opt/google/chrome/chrome',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/snap/bin/chromium',
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-stable',
-      '/usr/bin/brave-browser',
-    ];
-  }
-
-  private findChromeOnPath(): string | null {
-    const isWindows = process.platform === 'win32';
-    const binaries = isWindows
-      ? ['chrome.exe', 'chromium.exe', 'msedge.exe', 'brave.exe']
-      : [
-          'google-chrome',
-          'google-chrome-stable',
-          'chromium',
-          'chromium-browser',
-          'microsoft-edge',
-          'brave-browser',
-        ];
-
-    const pathEnv = process.env.PATH || '';
-    const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
-
-    for (const dir of pathDirs) {
-      for (const binary of binaries) {
-        const candidate = path.join(dir, binary);
-        try {
-          if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-            return candidate;
-          }
-        } catch {
-          // Ignore inaccessible PATH entries
-        }
-      }
-    }
-
-    return null;
   }
 
   private async isPortOpen(port: number): Promise<boolean> {
@@ -191,8 +284,21 @@ export class ChromeManager {
       });
     }
 
-    const page = await this.getActivePage();
-    await this.applyStealth(page);
+    this.attachTargetListeners();
+
+    // Seed the registry with pages that already exist (don't rely only on
+    // future targetcreated events). registerPage applies stealth centrally.
+    const existing = await this.browser.pages();
+    for (const existingPage of existing) {
+      await this.registerPage(existingPage);
+    }
+
+    // Obtain the page to drive: the seeded active page, or a fresh one.
+    let page = this.activePage;
+    if (!page || page.isClosed()) {
+      page = await this.browser.newPage();
+      await this.registerPage(page);
+    }
 
     if (initialUrl && initialUrl !== 'about:blank') {
       const currentUrl = page.url();
@@ -208,24 +314,323 @@ export class ChromeManager {
     return { browser: this.browser, page };
   }
 
+  /**
+   * Returns the explicitly tracked active page. Backward compatible: same name,
+   * same `Promise<Page>` return type, existing BrowserTools callers unchanged.
+   * Lazily launches when the browser is absent and falls back to re-seeding /
+   * opening a page so it never returns nothing.
+   */
   public async getActivePage(): Promise<Page> {
     if (!this.browser || !this.browser.isConnected()) {
       const { page } = await this.launch();
       return page;
     }
 
-    const pages = await this.browser.pages();
-    if (pages.length === 0) {
-      const newPage = await this.browser.newPage();
-      await this.applyStealth(newPage);
-      return newPage;
+    if (this.activePage && !this.activePage.isClosed()) {
+      return this.activePage;
     }
 
-    // Prefer the active tab with actual content over about:blank
-    const nonBlank = pages.find((p) => p.url() !== 'about:blank' && p.url() !== '');
-    const page = nonBlank || pages[pages.length - 1];
-    await this.applyStealth(page);
-    return page;
+    // Registry empty or active page closed: re-seed from live pages.
+    const existing = await this.browser.pages();
+    for (const existingPage of existing) {
+      if (!existingPage.isClosed()) {
+        await this.registerPage(existingPage);
+      }
+    }
+
+    if (!this.activePage || this.activePage.isClosed()) {
+      const page = await this.browser.newPage();
+      await this.registerPage(page);
+    }
+
+    return this.activePage!;
+  }
+
+  /** Snapshot of all tracked open pages (test accessor; Task 3 builds on it). */
+  public getPages(): Page[] {
+    return [...this.pages];
+  }
+
+  /**
+   * Returns the currently tracked active page without lazily launching the
+   * browser (unlike getActivePage()). Multi-tab tools use this to mark the
+   * active tab and to resolve "close the active tab" without forcing a launch.
+   */
+  public getActivePageOrNull(): Page | null {
+    return this.activePage;
+  }
+
+  /**
+   * Single public activation entry point for already-registered pages. Sets
+   * the given page active iff it is tracked and still open. Does NOT register
+   * or (re)apply stealth — those remain owned solely by registerPage() so the
+   * stealth-in-one-place invariant holds. Returns false on a stale/unknown
+   * page so callers can surface a structured error instead of throwing.
+   */
+  public setActivePage(page: Page): boolean {
+    if (this.pages.has(page) && !page.isClosed()) {
+      this.activePage = page;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Single central path for page registration. Both startup seeding and the
+   * targetcreated handler route through here so a window.open popup gets the
+   * exact same treatment as the initial page: tracked, stealthed once, and
+   * made active. Never throws (race-safe) so it can't crash the server.
+   */
+  private async registerPage(page: Page): Promise<void> {
+    try {
+      if (!this.pages.has(page)) {
+        this.pages.add(page);
+        // Apply stealth exactly once per page through this one place.
+        if (!this.stealthed.has(page)) {
+          await this.applyStealth(page);
+          this.stealthed.add(page);
+        }
+        // Deregister when the page closes.
+        page.once('close', () => this.deregisterPage(page));
+        // Wire network (Task 7) and console (Task 8) capture through this one
+        // central path so every tracked page — initial, popup, or new tab —
+        // gets capture attached exactly once.
+        this.attachCaptureListeners(page);
+        // Install the dialog handler too (Task 9). It is a no-op until a mode
+        // is configured, so future tabs auto-handle once setDialogHandling runs.
+        this.installDialogHandler(page);
+      }
+      // Activation policy: a newly registered tab/popup BECOMES the active
+      // page, so new tabs are never lost.
+      this.activePage = page;
+    } catch (err) {
+      // Race: page may already be closed/navigated. Log, never rethrow.
+      console.error('registerPage failed:', err);
+    }
+  }
+
+  /**
+   * Lazily create (and cache) the capture state for a page. Buffers live in a
+   * WeakMap keyed by Page so they are released when the page is GC'd.
+   */
+  private getCaptureState(page: Page): PageCaptureState {
+    let state = this.captures.get(page);
+    if (!state) {
+      state = { network: [], console: [] };
+      this.captures.set(page, state);
+    }
+    return state;
+  }
+
+  /** Push to a ring buffer, dropping the oldest entry past `cap`. */
+  private pushCapped<T>(buffer: T[], entry: T, cap: number): void {
+    buffer.push(entry);
+    if (buffer.length > cap) buffer.shift();
+  }
+
+  /**
+   * Attach per-page network and console/pageerror listeners. Called exactly
+   * once per page from registerPage. Every listener body is try/catch'd so a
+   * capture error can never crash the page or the server. puppeteer removes a
+   * destroyed page's listeners automatically, so no explicit page.off is
+   * needed on close.
+   */
+  private attachCaptureListeners(page: Page): void {
+    const state = this.getCaptureState(page);
+
+    // --- Network (Task 7) ---
+    page.on('request', (req: HTTPRequest) => {
+      try {
+        this.pushCapped(
+          state.network,
+          {
+            id: String(this.networkIdSeq++),
+            method: req.method(),
+            url: req.url(),
+            resourceType: req.resourceType(),
+            status: null,
+            timestamp: Date.now(),
+            req,
+          },
+          MAX_NETWORK_ENTRIES
+        );
+      } catch {
+        // Never let a capture error surface.
+      }
+    });
+
+    page.on('response', (res: HTTPResponse) => {
+      try {
+        const reqRef = res.request();
+        const entry = state.network.find((e) => e.req === reqRef);
+        if (entry) {
+          entry.status = res.status();
+          entry.res = res;
+        }
+      } catch {
+        // Ignore unmatched/raced responses.
+      }
+    });
+
+    page.on('requestfailed', (req: HTTPRequest) => {
+      try {
+        const entry = state.network.find((e) => e.req === req);
+        if (entry) {
+          entry.status = null;
+          entry.failure = req.failure()?.errorText;
+        }
+      } catch {
+        // Ignore.
+      }
+    });
+
+    // --- Console (Task 8) ---
+    page.on('console', (msg) => {
+      try {
+        const loc = msg.location();
+        this.pushCapped(
+          state.console,
+          {
+            type: msg.type(),
+            text: msg.text(),
+            url: loc?.url,
+            lineNumber: loc?.lineNumber,
+            columnNumber: loc?.columnNumber,
+            timestamp: Date.now(),
+          },
+          MAX_CONSOLE_ENTRIES
+        );
+      } catch {
+        // Ignore.
+      }
+    });
+
+    page.on('pageerror', (err: unknown) => {
+      try {
+        this.pushCapped(
+          state.console,
+          {
+            type: 'pageerror',
+            text: err instanceof Error ? err.message : String(err),
+            timestamp: Date.now(),
+          },
+          MAX_CONSOLE_ENTRIES
+        );
+      } catch {
+        // Ignore.
+      }
+    });
+  }
+
+  /**
+   * Install the single per-page 'dialog' listener (Task 9). Idempotent via the
+   * dialogHandled WeakSet so re-configuring never stacks handlers. The handler
+   * reads this.dialogConfig live: while null it is a no-op (does NOT answer the
+   * dialog), and once a mode is set it accepts/dismisses every native dialog
+   * (alert/confirm/beforeunload/prompt) so an auto-handled dialog never hangs.
+   */
+  private installDialogHandler(page: Page): void {
+    if (this.dialogHandled.has(page)) return;
+    this.dialogHandled.add(page);
+    page.on('dialog', async (dialog) => {
+      try {
+        const cfg = this.dialogConfig;
+        if (!cfg) return;
+        if (cfg.action === 'dismiss') {
+          await dialog.dismiss();
+        } else {
+          await dialog.accept(cfg.promptText);
+        }
+      } catch {
+        // Never let a dialog-handling error crash the server.
+      }
+    });
+  }
+
+  /**
+   * Configure persistent auto-handling of native dialogs across all tracked
+   * pages (Task 9). Stores the mode and installs the per-page handler on every
+   * live page; future pages pick it up via registerPage. Replaceable: calling
+   * again just updates the live config read by the already-installed handlers.
+   */
+  public setDialogHandling(action: 'accept' | 'dismiss', promptText?: string): void {
+    this.dialogConfig = { action, promptText };
+    for (const page of this.getPages().filter((p) => !p.isClosed())) {
+      this.installDialogHandler(page);
+    }
+  }
+
+  /** Current dialog auto-handling config, or null when none is set. */
+  public getDialogConfig(): { action: 'accept' | 'dismiss'; promptText?: string } | null {
+    return this.dialogConfig;
+  }
+
+  /** Captured network entries for a page (empty if none captured yet). */
+  public getNetworkEntries(page: Page): NetworkEntry[] {
+    return this.captures.get(page)?.network ?? [];
+  }
+
+  /** Captured console entries for a page (empty if none captured yet). */
+  public getConsoleEntries(page: Page): ConsoleEntry[] {
+    return this.captures.get(page)?.console ?? [];
+  }
+
+  /**
+   * Find a captured network entry by its globally-unique id across all tracked
+   * pages. Returns null when no entry matches (never throws).
+   */
+  public findNetworkEntry(id: string): NetworkEntry | null {
+    for (const page of this.pages) {
+      const entry = this.captures.get(page)?.network.find((e) => e.id === id);
+      if (entry) return entry;
+    }
+    return null;
+  }
+
+  /** Remove a page from the registry and reselect a sane active page. */
+  private deregisterPage(page: Page): void {
+    this.pages.delete(page);
+    this.stealthed.delete(page);
+    // Free capture buffers eagerly (the WeakMap would GC them anyway).
+    this.captures.delete(page);
+    if (this.activePage === page) {
+      // Most-recently-added survivor, or null when none remain.
+      this.activePage = [...this.pages].pop() ?? null;
+    }
+  }
+
+  /** Attach targetcreated/targetdestroyed handlers once per connection. */
+  private attachTargetListeners(): void {
+    if (!this.browser || this.listenersAttached) return;
+
+    this.onTargetCreated = async (target: Target) => {
+      try {
+        if (target.type() !== 'page') return;
+        const page = await target.page();
+        if (!page) return; // race: target.page() can be null
+        await this.registerPage(page);
+      } catch (err) {
+        // Never crash the server on a target event.
+        console.error('targetcreated handler failed:', err);
+      }
+    };
+
+    this.onTargetDestroyed = async (_target: Target) => {
+      try {
+        // The target may be gone, so prune any pages that are now closed. The
+        // per-page 'close' listener is the primary dereg path; this is a
+        // backstop.
+        for (const p of [...this.pages]) {
+          if (p.isClosed()) this.deregisterPage(p);
+        }
+      } catch (err) {
+        console.error('targetdestroyed handler failed:', err);
+      }
+    };
+
+    this.browser.on('targetcreated', this.onTargetCreated);
+    this.browser.on('targetdestroyed', this.onTargetDestroyed);
+    this.listenersAttached = true;
   }
 
   private async applyStealth(page: Page): Promise<void> {
@@ -260,8 +665,29 @@ export class ChromeManager {
   }
 
   public async close(): Promise<void> {
+    if (this.browser) {
+      // Detach target listeners so they don't leak across re-launches.
+      if (this.onTargetCreated) {
+        this.browser.off('targetcreated', this.onTargetCreated);
+      }
+      if (this.onTargetDestroyed) {
+        this.browser.off('targetdestroyed', this.onTargetDestroyed);
+      }
+    }
+    this.listenersAttached = false;
+    this.onTargetCreated = undefined;
+    this.onTargetDestroyed = undefined;
+    this.pages.clear();
+    this.activePage = null;
+    this.stealthed = new WeakSet<Page>();
+    // Reset dialog auto-handling so a reconnect starts clean.
+    this.dialogConfig = null;
+    this.dialogHandled = new WeakSet<Page>();
+
     if (this.browser && this.browser.isConnected()) {
       await this.browser.close();
+      this.browser = null;
+    } else {
       this.browser = null;
     }
     if (this.process) {

@@ -1,4 +1,20 @@
 node_modules/
 dist/
+dist-test/
 *.log
 .DS_Store
+
+# IDE / assistant workspace files
+.kiro/
+
+# Local secrets and environment
+.env
+.env.*
+
+# Persistent Chrome user-data / login profile (never commit)
+chrome-profile/
+user-data-dir/
+.chrome-profile/
+
+# Workflow / agent task artifacts
+.agents/

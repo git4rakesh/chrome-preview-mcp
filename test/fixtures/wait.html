@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Wait Fixture</title>
+  </head>
+  <body>
+    <h1>Wait Fixture</h1>
+    <script>
+      // After ~300ms append an element that drives both the selector
+      // condition (#late) and the text condition ("late text here").
+      // No network use.
+      setTimeout(function () {
+        var div = document.createElement('div');
+        div.id = 'late';
+        div.textContent = 'late text here';
+        document.body.appendChild(div);
+      }, 300);
+    </script>
+  </body>
+</html>
