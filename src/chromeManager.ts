@@ -9,6 +9,7 @@ import puppeteer, {
   HTTPRequest,
   HTTPResponse,
 } from 'puppeteer-core';
+import { config } from './config.js';
 
 export interface ChromeManagerOptions {
   chromePath?: string;
@@ -16,12 +17,18 @@ export interface ChromeManagerOptions {
   port?: number;
 }
 
-// Capture caps. Constants only (no env/manual config) so capture works out of
-// the box and the ring buffers stay bounded. Task 8 reuses MAX_CONSOLE_ENTRIES.
-const MAX_NETWORK_ENTRIES = 500;
-const MAX_CONSOLE_ENTRIES = 500;
-/** Default body cap for get_network_request (read lazily in BrowserTools). */
-export const MAX_RESPONSE_BODY_CHARS = 100000;
+// Capture caps now sourced from the single config module (defaults identical to
+// the previous hard-coded 500/500/100000). The ring buffers stay bounded and
+// everything works out of the box with no env set. Task 8 reuses
+// MAX_CONSOLE_ENTRIES.
+const MAX_NETWORK_ENTRIES = config.NETWORK_BUFFER_SIZE;
+const MAX_CONSOLE_ENTRIES = config.CONSOLE_BUFFER_SIZE;
+/**
+ * Default body cap for get_network_request (read lazily in BrowserTools).
+ * Re-exported from config so tools.ts keeps importing the MAX_RESPONSE_BODY_CHARS
+ * symbol from here unchanged.
+ */
+export const MAX_RESPONSE_BODY_CHARS = config.RESPONSE_BODY_CHARS;
 
 /**
  * One captured network request. Holds live puppeteer refs (`req`/`res`) so
@@ -66,9 +73,10 @@ interface PageCaptureState {
  * locations, then a PATH scan fallback.
  */
 export function detectChromePath(): string | null {
-  // Explicit override always wins, regardless of platform.
-  if (process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH)) {
-    return process.env.CHROME_PATH;
+  // Explicit override always wins, regardless of platform. Sourced via config
+  // (raw CHROME_PATH value); detection precedence/order is unchanged.
+  if (config.CHROME_PATH && fs.existsSync(config.CHROME_PATH)) {
+    return config.CHROME_PATH;
   }
 
   const candidates = getChromeCandidatesForPlatform();

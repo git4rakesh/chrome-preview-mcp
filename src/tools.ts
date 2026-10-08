@@ -1,20 +1,69 @@
 import { Page, ElementHandle } from 'puppeteer-core';
 import { ChromeManager, MAX_RESPONSE_BODY_CHARS } from './chromeManager.js';
 import { humanClick, humanMove } from './humanMouse.js';
+import { config } from './config.js';
 
 /** Mouse-motion mode for click/hover. */
 export type MotionMode = 'instant' | 'human';
 
 /**
  * Resolve the effective motion mode: an explicit per-call value always wins;
- * otherwise fall back to the HUMANIZE_INPUT env default (true/1 => 'human',
- * anything else/unset => 'instant'). Keeps the default 'instant' so existing
- * behavior is preserved with no env and no param.
+ * otherwise fall back to the HUMANIZE_INPUT default (read via config: true/1
+ * => 'human', anything else/unset => 'instant'). Keeps the default 'instant'
+ * so existing behavior is preserved with no env and no param.
  */
 function resolveMotion(explicit?: MotionMode): MotionMode {
   if (explicit === 'human' || explicit === 'instant') return explicit;
-  const env = process.env.HUMANIZE_INPUT;
-  return env === 'true' || env === '1' ? 'human' : 'instant';
+  return config.HUMANIZE_INPUT ? 'human' : 'instant';
+}
+
+/**
+ * PURE: safely build the puppeteer selector-engine string for text/role
+ * targeting, encoding interpolated values so they cannot break or alter the
+ * selector grammar (the Task-6 escaping gap). Returns `null` when a value is
+ * UNREPRESENTABLE for its engine, so the caller can fail CLOSED (structured
+ * not-found) rather than mis-resolving to the wrong element.
+ *
+ * Why the two engines are handled differently (verified against
+ * puppeteer-core 24.x's GetQueryHandler + AriaQueryHandler):
+ *
+ *  - `text/<value>`: the ENTIRE remainder after the `text/` prefix is taken as
+ *    the literal text to match — there is no sub-grammar, quoting, or escape
+ *    syntax. So a text value cannot "break out" of anything; it is already a
+ *    literal. We pass it through unchanged (newlines/control chars aside),
+ *    preserving today's exact matching. We only reject an empty value.
+ *
+ *  - `aria/<name>[role="<role>"]`: the aria handler parses the remainder with
+ *    a regex that strips `[<attr>="<value>"]` segments and treats the leftover
+ *    as the accessible name. A name containing `[`, `]`, or a quote could
+ *    inject/alter an attribute segment, and a role containing `"`/`\` could
+ *    terminate the `[role="..."]` segment. There is no robust way to escape a
+ *    bracket in the NAME against that regex, so for the name we fail closed on
+ *    any grammar-significant character (`[`, `]`, `"`, `'`, `\`); for the role
+ *    (which sits inside a quoted segment) we backslash-escape `\` and `"`.
+ */
+const ARIA_NAME_UNSAFE = /[[\]"'\\]/;
+
+export function buildTextEngineSelector(value: string): string | null {
+  if (value.length === 0) return null;
+  // Literal remainder — no escaping needed; pass through unchanged.
+  return `text/${value}`;
+}
+
+export function buildAriaEngineSelector(
+  name: string,
+  role?: string
+): string | null {
+  if (name.length === 0) return null;
+  // The accessible name has no safe escape against the attribute regex, so
+  // reject grammar-significant characters (fail closed).
+  if (ARIA_NAME_UNSAFE.test(name)) return null;
+  if (role === undefined) return `aria/${name}`;
+  // Reject brackets/quotes-of-the-other-kind in the role too; backslash-escape
+  // the chars that could terminate the quoted segment.
+  if (/[[\]']/.test(role)) return null;
+  const escapedRole = role.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `aria/${name}[role="${escapedRole}"]`;
 }
 
 /** Header names that are always redacted (compared case-insensitively). */
@@ -69,11 +118,11 @@ interface ResolveFailure {
 }
 type ResolveResult = ResolveSuccess | ResolveFailure;
 
-// Size caps for page-reading tools. Constants only (no env/manual config) so
-// the defaults work out of the box; callers may override get_html's cap via
-// its maxLength param.
-const MAX_CONTENT_CHARS = 50000;
-const MAX_HTML_CHARS = 500000;
+// Size caps for page-reading tools, sourced from the single config module
+// (defaults identical to the previous 50000/500000). They work out of the box
+// with no env set; callers may override get_html's cap via its maxLength param.
+const MAX_CONTENT_CHARS = config.CONTENT_CHARS;
+const MAX_HTML_CHARS = config.HTML_CHARS;
 
 export class BrowserTools {
   constructor(private chromeManager: ChromeManager) {}
@@ -140,19 +189,31 @@ export class BrowserTools {
 
     let engineSelector: string;
     switch (by) {
-      case 'text':
-        engineSelector = `text/${selector}`;
+      case 'text': {
+        // text/<value> remainder is a literal; builder only rejects empty.
+        const built = buildTextEngineSelector(selector);
+        if (built === null) {
+          return { ok: false, notFound: true };
+        }
+        engineSelector = built;
         break;
-      case 'role':
-        engineSelector = role
-          ? `aria/${selector}[role="${role}"]`
-          : `aria/${selector}`;
+      }
+      case 'role': {
+        // Fail closed (structured not-found) for name/role values that would
+        // break or alter the aria selector grammar, rather than mis-resolving.
+        const built = buildAriaEngineSelector(selector, role);
+        if (built === null) {
+          return { ok: false, notFound: true };
+        }
+        engineSelector = built;
         break;
+      }
       default:
-        engineSelector = selector; // css / undefined
+        engineSelector = selector; // css / undefined — pass-through unchanged
     }
 
-    const timeout = typeof args.timeout === 'number' ? args.timeout : 10000;
+    const timeout =
+      typeof args.timeout === 'number' ? args.timeout : config.RESOLVE_TIMEOUT_MS;
 
     try {
       const handle = await page.waitForSelector(engineSelector, {
@@ -507,9 +568,23 @@ export class BrowserTools {
     };
   }
 
+  /**
+   * TRUST BOUNDARY (indirect eval): the code string supplied by the MCP client
+   * is executed in the page via indirect eval `(0, eval)(code)`, which runs it
+   * with FULL page privileges in the global scope. This is BY DESIGN: this
+   * server is a human-in-the-loop tool for a trusted local operator driving
+   * their OWN browser. It is NOT a sandbox for untrusted input — supplied code
+   * can read page state, cookies-of-the-DOM, perform navigations, and more.
+   * Only run code you would run yourself. Behavior here is intentionally
+   * unchanged; the indirect-eval form is preserved so hoisting/global-scope
+   * semantics match a top-level eval.
+   */
   public async evaluate(script: string) {
     const page = await this.chromeManager.getActivePage();
     const result = await page.evaluate((code: string) => {
+      // Indirect eval: full-privilege execution in the page global scope. See
+      // the trust-boundary note on this method — this is for a trusted
+      // operator, not a sandbox for untrusted input.
       return (0, eval)(code);
     }, script);
     return {

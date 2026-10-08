@@ -211,7 +211,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'evaluate',
-        description: 'Execute custom JavaScript code in the browser context.',
+        description:
+          'Execute custom JavaScript code in the browser context. TRUST BOUNDARY: the code is run via indirect eval ((0, eval)(code)) with FULL page privileges, intended for a trusted local operator driving their OWN browser (human-in-the-loop) — this is NOT a sandbox for untrusted input. Only pass code you would run yourself.',
         inputSchema: {
           type: 'object',
           properties: {

@@ -11,6 +11,7 @@
 // browser. Only puppeteer-core TYPES are referenced here (no runtime import),
 // keeping this module free of new dependencies.
 import type { Page } from 'puppeteer-core';
+import { config } from './config.js';
 
 /** A 2D point in CSS pixels. */
 export interface Point {
@@ -32,8 +33,11 @@ export interface PathOptions {
   curvature?: number;
 }
 
-/** Default press->release dwell bounds in milliseconds. */
-export const DEFAULT_DWELL_MS = { min: 40, max: 120 } as const;
+/**
+ * Default press->release dwell bounds in milliseconds. Sourced from the single
+ * config module (defaults identical to the previous {min:40,max:120}).
+ */
+export const DEFAULT_DWELL_MS = config.DWELL_MS;
 
 const DEFAULT_STEPS = 24;
 const DEFAULT_JITTER = 2;
