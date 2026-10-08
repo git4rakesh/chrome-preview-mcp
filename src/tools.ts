@@ -861,4 +861,308 @@ export class BrowserTools {
 
     return { messages, count: messages.length };
   }
+
+  // ---- Interaction gap-fillers (Task 9) ------------------------------------
+
+  /**
+   * Hover an element located by CSS (default), visible text, or ARIA role +
+   * accessible name — the same targeting shape as `click`. Reuses the shared
+   * resolveElement, then calls elementHandle.hover(). Signature intentionally
+   * mirrors `click` so Task 11 can add human-motion options later. Structured
+   * not-found/invalid result, never throws.
+   */
+  public async hover(
+    selector: string,
+    opts: { by?: ResolveMode; role?: string } = {}
+  ) {
+    const page = await this.chromeManager.getActivePage();
+    const by = opts.by ?? 'css';
+    const res = await this.resolveElement(page, {
+      by: opts.by,
+      selector,
+      role: opts.role,
+    });
+
+    if (!res.ok) {
+      if (res.error) {
+        return { error: res.error, by, selector };
+      }
+      return {
+        found: false,
+        by,
+        selector,
+        role: opts.role,
+        message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    await res.handle.hover();
+    return {
+      message: `Hovered element matching selector: "${selector}"`,
+      by,
+      selector,
+      currentUrl: page.url(),
+    };
+  }
+
+  /**
+   * Scroll the page by an AMOUNT, or scroll an ELEMENT into view.
+   *
+   * Param shape `{ selector?, by?, role?, x?, y?, deltaY? }`:
+   *  - When `selector` is given: resolve it (css default, or text/role) via the
+   *    shared resolveElement and call handle.scrollIntoView() — "element" mode.
+   *    Structured not-found/invalid result on failure (no throw).
+   *  - Otherwise: scroll by amount via window.scrollBy(x ?? 0, y ?? deltaY ?? 0)
+   *    through evaluate — "amount" mode. `y`/`deltaY` are interchangeable
+   *    vertical deltas; `x` is the horizontal delta.
+   * Returns the resulting window scroll position `{ scrollX, scrollY }`.
+   */
+  public async scroll(
+    args: {
+      selector?: string;
+      by?: ResolveMode;
+      role?: string;
+      x?: number;
+      y?: number;
+      deltaY?: number;
+    } = {}
+  ) {
+    const page = await this.chromeManager.getActivePage();
+
+    if (args.selector !== undefined) {
+      const by = args.by ?? 'css';
+      const res = await this.resolveElement(page, {
+        by: args.by,
+        selector: args.selector,
+        role: args.role,
+      });
+      if (!res.ok) {
+        if (res.error) {
+          return { error: res.error, by, selector: args.selector };
+        }
+        return {
+          found: false,
+          by,
+          selector: args.selector,
+          role: args.role,
+          message: 'No element matched',
+          currentUrl: page.url(),
+        };
+      }
+      await res.handle.scrollIntoView();
+      const pos = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+      return {
+        message: `Scrolled element into view: "${args.selector}"`,
+        mode: 'element' as const,
+        scrollX: pos.x,
+        scrollY: pos.y,
+        currentUrl: page.url(),
+      };
+    }
+
+    const deltaX = args.x ?? 0;
+    const deltaY = args.y ?? args.deltaY ?? 0;
+    // Scroll by amount via window.scrollBy through evaluate. This is
+    // deterministic across environments (CDP mouse-wheel hit-testing can be
+    // dropped on pages with no layout viewport), and is one of the documented
+    // amount-scroll mechanisms for this tool.
+    const pos = await page.evaluate(
+      (dx: number, dy: number) => {
+        window.scrollBy(dx, dy);
+        return { x: window.scrollX, y: window.scrollY };
+      },
+      deltaX,
+      deltaY
+    );
+    return {
+      message: `Scrolled by (${deltaX}, ${deltaY})`,
+      mode: 'amount' as const,
+      scrollX: pos.x,
+      scrollY: pos.y,
+      currentUrl: page.url(),
+    };
+  }
+
+  /**
+   * Select option(s) in a <select>. Params `{ selector, by?, role?, values }`
+   * where `values` accepts a single string OR an array (for multi-selects).
+   *  - CSS targeting (by undefined/'css'): backed by page.select(cssSelector,
+   *    ...values), which returns the actually-applied values.
+   *  - text/role targeting: resolve via the shared resolveElement, then set the
+   *    selection in-page firing input+change so page listeners react as they
+   *    would for a real selection.
+   * Returns the selected value(s). Structured not-found (unresolved target) or
+   * invalid-option (nothing matched) result, never throws.
+   */
+  public async selectOption(args: {
+    selector: string;
+    by?: ResolveMode;
+    role?: string;
+    values: string | string[];
+  }) {
+    const page = await this.chromeManager.getActivePage();
+    const by = args.by ?? 'css';
+    const values = Array.isArray(args.values) ? args.values : [args.values];
+
+    if (!args.selector) {
+      return { error: 'selector is required', by };
+    }
+    if (values.length === 0) {
+      return { error: 'at least one value is required', by, selector: args.selector };
+    }
+
+    if (args.by === undefined || args.by === 'css') {
+      try {
+        const selected = await page.select(args.selector, ...values);
+        if (selected.length === 0) {
+          return {
+            selected: [],
+            invalidOption: true,
+            requested: values,
+            by: 'css',
+            selector: args.selector,
+            currentUrl: page.url(),
+          };
+        }
+        return { selected, by: 'css', selector: args.selector, currentUrl: page.url() };
+      } catch (err: any) {
+        // page.select throws if the selector matches no <select>; report it as
+        // a structured not-found instead of propagating.
+        return {
+          found: false,
+          by: 'css',
+          selector: args.selector,
+          message: err?.message || 'No <select> matched',
+          currentUrl: page.url(),
+        };
+      }
+    }
+
+    const res = await this.resolveElement(page, {
+      by: args.by,
+      selector: args.selector,
+      role: args.role,
+    });
+    if (!res.ok) {
+      if (res.error) {
+        return { error: res.error, by, selector: args.selector };
+      }
+      return {
+        found: false,
+        by,
+        selector: args.selector,
+        role: args.role,
+        message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    const selected = await res.handle.evaluate((el, vals: string[]) => {
+      const sel = el as HTMLSelectElement;
+      const set = new Set(vals);
+      for (const o of Array.from(sel.options)) {
+        o.selected = set.has(o.value);
+      }
+      sel.dispatchEvent(new Event('input', { bubbles: true }));
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return Array.from(sel.selectedOptions).map((o) => o.value);
+    }, values);
+
+    if (selected.length === 0) {
+      return {
+        selected: [],
+        invalidOption: true,
+        requested: values,
+        by,
+        selector: args.selector,
+        currentUrl: page.url(),
+      };
+    }
+    return { selected, by, selector: args.selector, currentUrl: page.url() };
+  }
+
+  /**
+   * Configure automatic handling of native dialogs (alert/confirm/
+   * beforeunload/prompt). Params `{ action?: 'accept'|'dismiss', promptText? }`
+   * (default action 'accept'). Sets a persistent cross-page MODE on the
+   * ChromeManager that applies to all current and future pages until changed —
+   * idempotent/replaceable, never stacks or leaves a double-handling listener.
+   * Returns confirmation of the configured handling. Never throws.
+   */
+  public async handleDialog(
+    args: { action?: 'accept' | 'dismiss'; promptText?: string } = {}
+  ) {
+    const action = args.action ?? 'accept';
+    if (action !== 'accept' && action !== 'dismiss') {
+      return { error: "action must be 'accept' or 'dismiss'" };
+    }
+    this.chromeManager.setDialogHandling(action, args.promptText);
+    return {
+      message: 'Dialog handling configured',
+      action,
+      promptText: args.promptText ?? null,
+    };
+  }
+
+  /**
+   * Navigate back in history (page.goBack) with a sensible waitUntil/timeout
+   * default matching `navigate`. Returns a structured { navigated:false } note
+   * when there is no previous history entry (puppeteer returns null) rather
+   * than throwing.
+   */
+  public async goBack(
+    args: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2'; timeout?: number } = {}
+  ) {
+    const page = await this.chromeManager.getActivePage();
+    const res = await page
+      .goBack({
+        waitUntil: args.waitUntil ?? 'domcontentloaded',
+        timeout: args.timeout ?? 30000,
+      })
+      .catch(() => null);
+    if (res === null) {
+      return { navigated: false, note: 'No previous history entry', currentUrl: page.url() };
+    }
+    return { navigated: true, currentUrl: page.url(), title: await page.title() };
+  }
+
+  /**
+   * Navigate forward in history (page.goForward). Returns a structured
+   * { navigated:false } note when there is no next history entry rather than
+   * throwing.
+   */
+  public async goForward(
+    args: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2'; timeout?: number } = {}
+  ) {
+    const page = await this.chromeManager.getActivePage();
+    const res = await page
+      .goForward({
+        waitUntil: args.waitUntil ?? 'domcontentloaded',
+        timeout: args.timeout ?? 30000,
+      })
+      .catch(() => null);
+    if (res === null) {
+      return { navigated: false, note: 'No next history entry', currentUrl: page.url() };
+    }
+    return { navigated: true, currentUrl: page.url(), title: await page.title() };
+  }
+
+  /**
+   * Reload the active page (page.reload) with a sensible waitUntil/timeout
+   * default. Returns the resulting url/title. Never throws (reload errors are
+   * swallowed so a flaky asset load does not fail the call).
+   */
+  public async reload(
+    args: { waitUntil?: 'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2'; timeout?: number } = {}
+  ) {
+    const page = await this.chromeManager.getActivePage();
+    await page
+      .reload({
+        waitUntil: args.waitUntil ?? 'domcontentloaded',
+        timeout: args.timeout ?? 30000,
+      })
+      .catch(() => null);
+    return { reloaded: true, currentUrl: page.url(), title: await page.title() };
+  }
 }

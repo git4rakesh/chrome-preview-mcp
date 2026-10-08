@@ -185,6 +185,14 @@ export class ChromeManager {
   // Guards stealth idempotency: evaluateOnNewDocument() stacks on every call,
   // so each page must be stealthed exactly once.
   private stealthed = new WeakSet<Page>();
+  // Dialog auto-handling (Task 9). A persistent cross-page MODE: once set, it
+  // applies to all dialogs on all tracked pages (current and future) until
+  // changed/cleared. null means "no auto-handling configured" and the per-page
+  // handler is then a no-op. The handler reads this config live, so
+  // re-configuring never stacks handlers.
+  private dialogConfig: { action: 'accept' | 'dismiss'; promptText?: string } | null = null;
+  // Guards the per-page 'dialog' listener so each page gets exactly one.
+  private dialogHandled = new WeakSet<Page>();
   // Per-page network/console capture buffers. WeakMap-keyed by Page so a
   // dropped page's buffers are GC'd automatically; deregisterPage also deletes
   // eagerly for promptness. Network ids are unique across all pages.
@@ -380,6 +388,9 @@ export class ChromeManager {
         // central path so every tracked page — initial, popup, or new tab —
         // gets capture attached exactly once.
         this.attachCaptureListeners(page);
+        // Install the dialog handler too (Task 9). It is a no-op until a mode
+        // is configured, so future tabs auto-handle once setDialogHandling runs.
+        this.installDialogHandler(page);
       }
       // Activation policy: a newly registered tab/popup BECOMES the active
       // page, so new tabs are never lost.
@@ -503,6 +514,49 @@ export class ChromeManager {
     });
   }
 
+  /**
+   * Install the single per-page 'dialog' listener (Task 9). Idempotent via the
+   * dialogHandled WeakSet so re-configuring never stacks handlers. The handler
+   * reads this.dialogConfig live: while null it is a no-op (does NOT answer the
+   * dialog), and once a mode is set it accepts/dismisses every native dialog
+   * (alert/confirm/beforeunload/prompt) so an auto-handled dialog never hangs.
+   */
+  private installDialogHandler(page: Page): void {
+    if (this.dialogHandled.has(page)) return;
+    this.dialogHandled.add(page);
+    page.on('dialog', async (dialog) => {
+      try {
+        const cfg = this.dialogConfig;
+        if (!cfg) return;
+        if (cfg.action === 'dismiss') {
+          await dialog.dismiss();
+        } else {
+          await dialog.accept(cfg.promptText);
+        }
+      } catch {
+        // Never let a dialog-handling error crash the server.
+      }
+    });
+  }
+
+  /**
+   * Configure persistent auto-handling of native dialogs across all tracked
+   * pages (Task 9). Stores the mode and installs the per-page handler on every
+   * live page; future pages pick it up via registerPage. Replaceable: calling
+   * again just updates the live config read by the already-installed handlers.
+   */
+  public setDialogHandling(action: 'accept' | 'dismiss', promptText?: string): void {
+    this.dialogConfig = { action, promptText };
+    for (const page of this.getPages().filter((p) => !p.isClosed())) {
+      this.installDialogHandler(page);
+    }
+  }
+
+  /** Current dialog auto-handling config, or null when none is set. */
+  public getDialogConfig(): { action: 'accept' | 'dismiss'; promptText?: string } | null {
+    return this.dialogConfig;
+  }
+
   /** Captured network entries for a page (empty if none captured yet). */
   public getNetworkEntries(page: Page): NetworkEntry[] {
     return this.captures.get(page)?.network ?? [];
@@ -618,6 +672,9 @@ export class ChromeManager {
     this.pages.clear();
     this.activePage = null;
     this.stealthed = new WeakSet<Page>();
+    // Reset dialog auto-handling so a reconnect starts clean.
+    this.dialogConfig = null;
+    this.dialogHandled = new WeakSet<Page>();
 
     if (this.browser && this.browser.isConnected()) {
       await this.browser.close();
