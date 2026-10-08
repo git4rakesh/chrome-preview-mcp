@@ -77,6 +77,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'ARIA role name (e.g. "button") used only when by="role".',
             },
+            motion: {
+              type: 'string',
+              enum: ['instant', 'human'],
+              description:
+                'Mouse motion mode. "instant" (default) clicks immediately; "human" moves the cursor along a curved, jittery path to the element center then presses/dwells/releases. Omit for backward-compatible behavior.',
+            },
+            seed: {
+              type: 'number',
+              description:
+                'Optional seed to make the human motion path and dwell deterministic (only used when motion="human").',
+            },
           },
           required: ['selector'],
         },
@@ -377,6 +388,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'ARIA role name (e.g. "button") used only when by="role".',
             },
+            motion: {
+              type: 'string',
+              enum: ['instant', 'human'],
+              description:
+                'Mouse motion mode. "instant" (default) hovers immediately; "human" moves the cursor along a curved, jittery path to the element center. Omit for backward-compatible behavior.',
+            },
+            seed: {
+              type: 'number',
+              description:
+                'Optional seed to make the human motion path deterministic (only used when motion="human").',
+            },
           },
           required: ['selector'],
         },
@@ -556,8 +578,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const selector = args?.selector as string;
         const by = args?.by as 'css' | 'text' | 'role' | undefined;
         const role = args?.role as string | undefined;
+        const motion = args?.motion as 'instant' | 'human' | undefined;
+        const seed = args?.seed as number | undefined;
         if (!selector) throw new Error('selector parameter is required');
-        const result = await tools.click(selector, { by, role });
+        const result = await tools.click(selector, { by, role, motion, seed });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
@@ -720,8 +744,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const selector = args?.selector as string;
         const by = args?.by as 'css' | 'text' | 'role' | undefined;
         const role = args?.role as string | undefined;
+        const motion = args?.motion as 'instant' | 'human' | undefined;
+        const seed = args?.seed as number | undefined;
         if (!selector) throw new Error('selector parameter is required');
-        const result = await tools.hover(selector, { by, role });
+        const result = await tools.hover(selector, { by, role, motion, seed });
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };

@@ -1,5 +1,21 @@
 import { Page, ElementHandle } from 'puppeteer-core';
 import { ChromeManager, MAX_RESPONSE_BODY_CHARS } from './chromeManager.js';
+import { humanClick, humanMove } from './humanMouse.js';
+
+/** Mouse-motion mode for click/hover. */
+export type MotionMode = 'instant' | 'human';
+
+/**
+ * Resolve the effective motion mode: an explicit per-call value always wins;
+ * otherwise fall back to the HUMANIZE_INPUT env default (true/1 => 'human',
+ * anything else/unset => 'instant'). Keeps the default 'instant' so existing
+ * behavior is preserved with no env and no param.
+ */
+function resolveMotion(explicit?: MotionMode): MotionMode {
+  if (explicit === 'human' || explicit === 'instant') return explicit;
+  const env = process.env.HUMANIZE_INPUT;
+  return env === 'true' || env === '1' ? 'human' : 'instant';
+}
 
 /** Header names that are always redacted (compared case-insensitively). */
 const ALWAYS_REDACT_HEADERS = new Set([
@@ -153,7 +169,7 @@ export class BrowserTools {
 
   public async click(
     selector: string,
-    opts: { by?: ResolveMode; role?: string } = {}
+    opts: { by?: ResolveMode; role?: string; motion?: MotionMode; seed?: number } = {}
   ) {
     const page = await this.chromeManager.getActivePage();
     const by = opts.by ?? 'css';
@@ -173,6 +189,36 @@ export class BrowserTools {
         selector,
         role: opts.role,
         message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    const motion = resolveMotion(opts.motion);
+    if (motion === 'human') {
+      // Human-like path requires a geometry; a null box (not rendered/zero-size)
+      // falls back to the instant click so we never throw.
+      const box = await res.handle.boundingBox();
+      if (box) {
+        const center = {
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+        await humanClick(page, center, { seed: opts.seed });
+        return {
+          message: `Clicked element matching selector: "${selector}"`,
+          by,
+          selector,
+          motion: 'human' as const,
+          currentUrl: page.url(),
+        };
+      }
+      await res.handle.click();
+      return {
+        message: `Clicked element matching selector: "${selector}"`,
+        by,
+        selector,
+        motion: 'instant' as const,
+        fallback: 'boundingBox was null; used instant click',
         currentUrl: page.url(),
       };
     }
@@ -943,7 +989,7 @@ export class BrowserTools {
    */
   public async hover(
     selector: string,
-    opts: { by?: ResolveMode; role?: string } = {}
+    opts: { by?: ResolveMode; role?: string; motion?: MotionMode; seed?: number } = {}
   ) {
     const page = await this.chromeManager.getActivePage();
     const by = opts.by ?? 'css';
@@ -963,6 +1009,36 @@ export class BrowserTools {
         selector,
         role: opts.role,
         message: 'No element matched',
+        currentUrl: page.url(),
+      };
+    }
+
+    const motion = resolveMotion(opts.motion);
+    if (motion === 'human') {
+      // The curved move itself is the hover. A null box falls back to the
+      // instant hover so we never throw.
+      const box = await res.handle.boundingBox();
+      if (box) {
+        const center = {
+          x: box.x + box.width / 2,
+          y: box.y + box.height / 2,
+        };
+        await humanMove(page, center, { seed: opts.seed });
+        return {
+          message: `Hovered element matching selector: "${selector}"`,
+          by,
+          selector,
+          motion: 'human' as const,
+          currentUrl: page.url(),
+        };
+      }
+      await res.handle.hover();
+      return {
+        message: `Hovered element matching selector: "${selector}"`,
+        by,
+        selector,
+        motion: 'instant' as const,
+        fallback: 'boundingBox was null; used instant hover',
         currentUrl: page.url(),
       };
     }
