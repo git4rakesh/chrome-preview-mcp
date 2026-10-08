@@ -382,8 +382,78 @@ export class BrowserTools {
     };
   }
 
-  public async takeScreenshot() {
+  /**
+   * Capture a screenshot of the active tab. Backward compatible: with neither
+   * `selector` nor `fullPage` given, this returns exactly `{ mimeType, data }`
+   * (base64 PNG) just as before — the default path and its return shape are
+   * unchanged.
+   *
+   * Optional params:
+   *  - `selector` (+ optional `by`/`role`, same targeting shape as click/type
+   *    via the shared resolveElement): capture an ELEMENT screenshot of the
+   *    first match. If the selector matches NOTHING, fall back to a normal
+   *    viewport screenshot and attach a `note` (and `selectorFound:false`) —
+   *    never throws, never fails.
+   *  - `fullPage` (default false): capture the full scrollable page.
+   *
+   * Precedence: `selector` WINS over `fullPage`. When a selector resolves, the
+   * element shot is taken and `fullPage` is ignored.
+   */
+  public async takeScreenshot(
+    args: {
+      selector?: string;
+      by?: ResolveMode;
+      role?: string;
+      fullPage?: boolean;
+    } = {}
+  ) {
     const page = await this.chromeManager.getActivePage();
+
+    // Element shot wins over fullPage when a selector is provided.
+    if (args.selector !== undefined) {
+      const res = await this.resolveElement(page, {
+        by: args.by,
+        selector: args.selector,
+        role: args.role,
+      });
+      if (res.ok) {
+        const data = await res.handle.screenshot({
+          encoding: 'base64',
+          type: 'png',
+        });
+        return {
+          mimeType: 'image/png',
+          data,
+          mode: 'element' as const,
+          selectorFound: true,
+        };
+      }
+      // Fallback-with-note: selector matched nothing — capture the viewport
+      // instead and tell the caller via a note (do NOT throw/fail).
+      const data = await page.screenshot({ encoding: 'base64', type: 'png' });
+      return {
+        mimeType: 'image/png',
+        data,
+        mode: 'viewport-fallback' as const,
+        selectorFound: false,
+        note: `selector "${args.selector}" matched nothing; captured viewport instead`,
+      };
+    }
+
+    if (args.fullPage === true) {
+      const data = await page.screenshot({
+        encoding: 'base64',
+        type: 'png',
+        fullPage: true,
+      });
+      return {
+        mimeType: 'image/png',
+        data,
+        mode: 'fullPage' as const,
+      };
+    }
+
+    // Default path — unchanged return shape for backward compatibility.
     const buffer = await page.screenshot({ encoding: 'base64', type: 'png' });
     return {
       mimeType: 'image/png',

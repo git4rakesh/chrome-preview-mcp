@@ -171,10 +171,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: 'take_screenshot',
-        description: 'Capture a screenshot of the visible Chrome tab.',
+        description:
+          'Capture a screenshot of the visible Chrome tab. When selector is provided, captures that element (selector takes precedence over fullPage); if the selector matches nothing, a normal viewport screenshot is returned with a note. fullPage=true captures the whole scrollable page.',
         inputSchema: {
           type: 'object',
-          properties: {},
+          properties: {
+            selector: {
+              type: 'string',
+              description:
+                'Optional element to capture. Takes precedence over fullPage; if it matches nothing, falls back to a viewport screenshot with a note.',
+            },
+            by: {
+              type: 'string',
+              enum: ['css', 'text', 'role'],
+              description: 'How to interpret selector (default css).',
+            },
+            role: {
+              type: 'string',
+              description: 'ARIA role filter when by=role.',
+            },
+            fullPage: {
+              type: 'boolean',
+              description:
+                'Capture the full scrollable page (default false). Ignored when selector is provided.',
+            },
+          },
         },
       },
       {
@@ -585,16 +606,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'take_screenshot': {
-        const result = await tools.takeScreenshot();
-        return {
-          content: [
-            {
-              type: 'image',
-              data: result.data as string,
-              mimeType: result.mimeType,
-            },
-          ],
-        };
+        const result = await tools.takeScreenshot({
+          selector: args?.selector as string | undefined,
+          by: args?.by as 'css' | 'text' | 'role' | undefined,
+          role: args?.role as string | undefined,
+          fullPage: args?.fullPage as boolean | undefined,
+        });
+        const content: Array<Record<string, unknown>> = [
+          {
+            type: 'image',
+            data: result.data as string,
+            mimeType: result.mimeType,
+          },
+        ];
+        // Surface the fallback note (if any) without disturbing the image
+        // content. The default path has no note, so output stays a single
+        // image item exactly as before.
+        const note = (result as { note?: string }).note;
+        if (note) {
+          content.push({ type: 'text', text: note });
+        }
+        return { content };
       }
 
       case 'evaluate': {
